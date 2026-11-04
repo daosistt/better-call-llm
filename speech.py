@@ -5,6 +5,7 @@ from io import BytesIO
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, BinaryIO
+import numpy as np
 
 if TYPE_CHECKING:
     from faster_whisper import WhisperModel
@@ -41,7 +42,11 @@ class SpeechRecognizer:
             raise ValueError("Аудиофайл пуст.")
         return self._transcribe(BytesIO(audio))
 
-    def _transcribe(self, source: str | BinaryIO) -> tuple[SpeechSegment, ...]:
+    def transcribe_pcm(self, pcm: bytes) -> tuple[SpeechSegment, ...]:
+        samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768
+        return self._transcribe(samples)
+
+    def _transcribe(self, source: str | BinaryIO | np.ndarray) -> tuple[SpeechSegment, ...]:
         with self._lock:
             if self._model is None:
                 from faster_whisper import WhisperModel

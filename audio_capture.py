@@ -5,6 +5,7 @@ import json
 import subprocess
 from dataclasses import dataclass, replace
 from threading import Lock
+from collections.abc import Callable
 
 import numpy as np
 
@@ -66,11 +67,12 @@ class AudioCapture:
             self._generation += 1
             self._state = replace(self._state, running=False, microphone_level=0, system_level=0)
 
-    async def run(self, microphone: str, monitor: str, generation: int) -> None:
+    async def run(self, microphone: str, monitor: str, generation: int,
+                  on_block: Callable[[str, bytes], None] | None = None) -> None:
         try:
             async with asyncio.TaskGroup() as group:
-                group.create_task(self._read(microphone, "microphone", generation))
-                group.create_task(self._read(monitor, "system", generation))
+                group.create_task(self._read(microphone, "microphone", generation, on_block))
+                group.create_task(self._read(monitor, "system", generation, on_block))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -81,7 +83,8 @@ class AudioCapture:
                         error="Захват прерван. Проверьте подключение устройств и доступ к PulseAudio/PipeWire, затем обновите список.",
                     )
 
-    async def _read(self, source: str, channel: str, generation: int) -> None:
+    async def _read(self, source: str, channel: str, generation: int,
+                    on_block: Callable[[str, bytes], None] | None = None) -> None:
         process = await asyncio.create_subprocess_exec(
             "parec", "--raw", f"--device={source}", "--rate=16000",
             "--channels=1", "--format=s16le", "--latency-msec=100",
@@ -100,6 +103,8 @@ class AudioCapture:
                         self._state = replace(self._state, **{
                             f"{channel}_level": value, f"{channel}_blocks": count,
                         })
+                if on_block is not None:
+                    on_block(channel, block)
         finally:
             if process.returncode is None:
                 try:

@@ -12,6 +12,9 @@ from config import Settings
 from solver import SolverError, solve
 from speech import SpeechRecognizer
 from audio_capture import AudioCapture
+from conversation import Conversation, ExtractedTask
+from codex_backend import solve_with_codex
+from live_speech import LiveSpeech, LiveState, Replica
 
 
 @lru_cache(maxsize=1)
@@ -58,7 +61,19 @@ class SolverWorker:
         self._generation = 0
         self._future: Future[None] | None = None
         self._closed = False
+        self.conversation = Conversation(self._on_extracted)
+        self.task_stability = 3.0
+        self.audio_buffer_seconds = 5.0
+        self.asr_queue_seconds = 48.0
+        self.speech_fragment_seconds = 12.0
+        self._auto_enabled = False
+        self._auto_solution = False
+        self._last_auto = ""
+        self._auto_timer: asyncio.TimerHandle | None = None
         self.capture = AudioCapture()
+        self._live: LiveSpeech | None = None
+        self._live_generation = 0
+        self._context_broken = False
         self._capture_future: Future[None] | None = None
         self._transcription = Transcription()
         self._speech_future: Future[None] | None = None
@@ -70,6 +85,51 @@ class SolverWorker:
         with self._lock:
             return self._solution
 
+    @property
+    def auto_enabled(self) -> bool:
+        with self._lock:
+            return self._auto_enabled
+
+    def add_replica(self, text: str, speaker: str) -> None:
+        self._loop.call_soon_threadsafe(self._add_replica, text, speaker)
+
+    def _add_replica(self, text: str, speaker: str) -> None:
+        if self._auto_timer is not None:
+            self._auto_timer.cancel()
+        self.conversation.add(text, speaker)
+
+    def set_auto(self, enabled: bool) -> None:
+        with self._lock:
+            if enabled and self._context_broken:
+                return
+            self._auto_enabled = enabled
+        if not enabled:
+            self.cancel()
+        else:
+            self._loop.call_soon_threadsafe(self._on_extracted, self.conversation.snapshot().task)
+
+    def _on_extracted(self, task: ExtractedTask) -> None:
+        if self._auto_timer is not None:
+            self._auto_timer.cancel()
+        fingerprint = " ".join(task.solver_condition.split())
+        if self._auto_solution and (fingerprint != " ".join(self.snapshot().problem.split()) or not task.complete):
+            # Уточнение или неполное новое условие делает старый ответ неактуальным.
+            with self._lock:
+                self._generation += 1
+                if self._future is not None:
+                    self._future.cancel()
+                self._solution = replace(self._solution, status="waiting")
+                self._last_auto = ""
+        if self.auto_enabled and self.conversation.snapshot().status == "ready" and task.complete and fingerprint and fingerprint != self._last_auto:
+            self._auto_timer = self._loop.call_later(self.task_stability, self._start_auto, task.solver_condition, fingerprint)
+
+    def _start_auto(self, condition: str, fingerprint: str) -> None:
+        state = self.conversation.snapshot()
+        if not self.auto_enabled or self._closed or state.status != "ready" or " ".join(state.task.solver_condition.split()) != fingerprint:
+            return
+        self._last_auto = fingerprint
+        self.start(condition, Settings(), use_codex=True, automatic=True)
+
     def start_capture(self, microphone: str, monitor: str, *, consent: bool) -> bool:
         with self._lock:
             if self._closed or not consent or not microphone or not monitor or microphone == monitor:
@@ -77,16 +137,72 @@ class SolverWorker:
             if self.capture.snapshot().running:
                 return False
             generation = self.capture.prepare()
+            self._live_generation += 1
+            token = self._live_generation
+            live = LiveSpeech(get_recognizer(),
+                              lambda replica: self._live_replica(replica, token),
+                              lambda: self._audio_gap(token),
+                              audio_buffer_seconds=self.audio_buffer_seconds,
+                              asr_queue_seconds=self.asr_queue_seconds,
+                              fragment_seconds=self.speech_fragment_seconds)
+            self._live = live
             self._capture_future = asyncio.run_coroutine_threadsafe(
-                self.capture.run(microphone, monitor, generation), self._loop,
+                self._capture_with_asr(microphone, monitor, generation, live, token), self._loop,
             )
             return True
 
+    async def _capture_with_asr(self, microphone: str, monitor: str, generation: int,
+                                live: LiveSpeech, token: int) -> None:
+        live.start()
+        try:
+            await self.capture.run(microphone, monitor, generation, live.feed)
+            if self.capture.snapshot().error:
+                self._audio_gap(token)
+        finally:
+            await live.close()
+
+    def _live_replica(self, replica: Replica, token: int) -> None:
+        if token == self._live_generation and not self._closed and not self.context_broken:
+            speaker = f"{replica.speaker} [{replica.start:.1f}–{replica.end:.1f} с]"
+            self._add_replica(replica.text, speaker)
+
+    @property
+    def context_broken(self) -> bool:
+        with self._lock:
+            return self._context_broken
+
+    def _audio_gap(self, token: int) -> None:
+        if token != self._live_generation or self._closed or self.context_broken:
+            return
+        with self._lock:
+            self._context_broken = True
+        self.cancel()
+        self.conversation.pause_for_gap()
+
+    def reset_context(self) -> None:
+        self.cancel()
+        self._loop.call_soon_threadsafe(self._reset_context)
+
+    def _reset_context(self) -> None:
+        self.conversation.reset()
+        if self._live is not None:
+            self._live.reset_context()
+        with self._lock:
+            self._context_broken = False
+            self._last_auto = ""
+
+    def live_snapshot(self) -> LiveState:
+        return self._live.snapshot() if self._live is not None else LiveState()
+
     def stop_capture(self) -> None:
         with self._lock:
+            self._live_generation += 1
             self.capture.stop()
             if self._capture_future is not None:
                 self._capture_future.cancel()
+        # После остановки не запускаем решение по последним накопленным репликам.
+        self.cancel()
+        self._loop.call_soon_threadsafe(self.conversation.suspend)
 
     def speech_snapshot(self) -> Transcription:
         with self._lock:
@@ -129,12 +245,13 @@ class SolverWorker:
 
     def cancel(self) -> None:
         with self._lock:
+            self._auto_enabled = False
             self._generation += 1
             self._solution = replace(self._solution, status="waiting", error="")
             if self._future is not None:
                 self._future.cancel()
 
-    def start(self, problem: str, settings: Settings) -> None:
+    def start(self, problem: str, settings: Settings, *, use_codex: bool = False, automatic: bool = False) -> None:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Фоновый обработчик закрыт")
@@ -142,8 +259,9 @@ class SolverWorker:
             if self._future is not None:
                 self._future.cancel()
             self._solution = Solution(status="solving", problem=problem)
+            self._auto_solution = automatic
             self._future = asyncio.run_coroutine_threadsafe(
-                self._solve(problem, settings, self._generation), self._loop,
+                self._solve(problem, settings, self._generation, use_codex), self._loop,
             )
 
     def _update(self, generation: int, **changes: str) -> None:
@@ -151,13 +269,17 @@ class SolverWorker:
             if generation == self._generation:
                 self._solution = replace(self._solution, **changes)
 
-    async def _solve(self, problem: str, settings: Settings, generation: int) -> None:
+    async def _solve(self, problem: str, settings: Settings, generation: int, use_codex: bool = False) -> None:
         text = ""
         try:
             async with asyncio.timeout(300):
-                async for chunk in solve(problem, settings):
-                    text += chunk
+                if use_codex:
+                    text = await solve_with_codex(problem)
                     self._update(generation, text=text)
+                else:
+                    async for chunk in solve(problem, settings):
+                        text += chunk
+                        self._update(generation, text=text)
             self._update(generation, status="done")
         except asyncio.CancelledError:
             raise
@@ -178,5 +300,6 @@ class SolverWorker:
                 self._speech_future.cancel()
         self.cancel()
         self.stop_capture()
+        self._loop.call_soon_threadsafe(self.conversation.close)
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=2)

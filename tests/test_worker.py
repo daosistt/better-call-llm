@@ -9,6 +9,7 @@ from solver import SolverError
 from worker import SolverWorker
 from speech import SpeechSegment
 from unittest.mock import MagicMock
+from conversation import ExtractedTask
 
 
 class WorkerTests(unittest.TestCase):
@@ -63,6 +64,62 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(state.text, "Часть решения")
             self.assertEqual(state.error, "Сеть недоступна")
 
+    def test_auto_solves_once_and_manual_edit_disables_it(self):
+        self.worker.conversation.pause = 0.01
+        self.worker.conversation.maximum = 0.02
+        self.worker.task_stability = 0.01
+        task = ExtractedTask("Найти производную x²", complete=True)
+        from unittest.mock import AsyncMock
+        with (
+            patch("conversation.extract", new_callable=AsyncMock, return_value=task),
+            patch("worker.solve_with_codex", new_callable=AsyncMock, return_value="2x") as solve,
+        ):
+            self.worker.set_auto(True)
+            self.worker.add_replica("Найти производную x²", "Ты")
+            deadline = time.monotonic() + 2
+            while self.worker.snapshot().status != "done" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(self.worker.snapshot().text, "2x")
+            self.worker.add_replica("да, x²", "Ты")
+            time.sleep(0.08)
+            solve.assert_awaited_once()
+            self.worker.cancel()  # Тот же обработчик вызывается ручной правкой.
+            self.assertFalse(self.worker.auto_enabled)
+            self.worker.add_replica("Найти производную x³", "Ты")
+            time.sleep(0.08)
+            solve.assert_awaited_once()
+
+    def test_auto_passes_ambiguities_and_reacts_to_changed_interpretation(self):
+        from unittest.mock import AsyncMock
+
+        self.worker.conversation.pause = 0.01
+        self.worker.conversation.maximum = 0.02
+        self.worker.task_stability = 0.01
+        task = ExtractedTask("Найти производную икс плюс один в квадрате", complete=True,
+                             ambiguities=("Вариант 1: (x+1)^2; вариант 2: x+1^2",))
+        with (
+            patch("conversation.extract", new_callable=AsyncMock, return_value=task) as extract,
+            patch("worker.solve_with_codex", new_callable=AsyncMock, return_value="Два ответа") as solve,
+        ):
+            self.worker.set_auto(True)
+            self.worker.add_replica(task.condition, "Ты")
+            deadline = time.monotonic() + 2
+            while solve.await_count < 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            solve.assert_awaited_once()
+            self.assertIn(task.ambiguities[0], solve.call_args.args[0])
+            self.worker.add_replica("Обсуждаем эти варианты", "Ты")
+            time.sleep(0.08)
+            solve.assert_awaited_once()
+            extract.return_value = ExtractedTask(task.condition, complete=True,
+                                                ambiguities=("Уточнение: имелось в виду (x+1)^2",))
+            self.worker.add_replica("Квадрат всей суммы", "Ты")
+            deadline = time.monotonic() + 2
+            while solve.await_count < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(solve.await_count, 2)
+            self.assertIn("Уточнение", solve.call_args.args[0])
+
     def test_recognition_does_not_block_solver_or_queue_more_files(self):
         started = Event()
         release = Event()
@@ -106,6 +163,35 @@ class WorkerTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(self.worker.speech_snapshot().status, "error")
             self.assertNotIn("private", self.worker.speech_snapshot().error)
+
+    def test_audio_gap_requires_explicit_context_reset(self):
+        self.worker.set_auto(True)
+        self.worker._loop.call_soon_threadsafe(self.worker._audio_gap, self.worker._live_generation)
+        deadline = time.monotonic() + 2
+        while not self.worker.context_broken and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(self.worker.context_broken)
+        self.assertFalse(self.worker.auto_enabled)
+        self.worker.set_auto(True)
+        self.assertFalse(self.worker.auto_enabled)
+        self.worker.reset_context()
+        deadline = time.monotonic() + 2
+        while self.worker.context_broken and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(self.worker.context_broken)
+        self.assertFalse(self.worker.auto_enabled)
+
+    def test_extractor_does_not_cancel_manual_codex_solution(self):
+        from unittest.mock import AsyncMock
+        with patch("worker.solve_with_codex", new_callable=AsyncMock, return_value="Ручной ответ"):
+            self.worker.start("Моя задача", Settings(), use_codex=True)
+            self.assertEqual(self.wait_done().text, "Ручной ответ")
+            self.worker._loop.call_soon_threadsafe(
+                self.worker._on_extracted, ExtractedTask("Другая задача", complete=True),
+            )
+            time.sleep(0.03)
+            self.assertEqual(self.worker.snapshot().status, "done")
+            self.assertEqual(self.worker.snapshot().problem, "Моя задача")
 
     def test_shutdown_cancels_request_and_stops_thread(self):
         started = Event()

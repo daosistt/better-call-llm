@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "condition": {"type": "string"},
+    "expressions": {"type": "array", "items": {"type": "string"}},
+    "complete": {"type": "boolean"},
+    "ambiguities": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["condition", "expressions", "complete", "ambiguities"],
+  "additionalProperties": false
+}

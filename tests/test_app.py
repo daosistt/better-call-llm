@@ -9,9 +9,29 @@ from streamlit.testing.v1 import AppTest
 from config import Settings
 from worker import SolverWorker, Transcription
 from audio_capture import AudioSource
+from conversation import ConversationState, ExtractedTask
 
 
 class AppTests(unittest.TestCase):
+    def test_edit_extracted_condition_preserves_manual_control(self):
+        worker = SolverWorker()
+        worker.set_auto(True)
+        state = ConversationState(task=ExtractedTask("Найти производную x²", complete=True), status="ready")
+        with patch("worker.SolverWorker", return_value=worker), patch.object(worker.conversation, "snapshot", return_value=state):
+            try:
+                app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
+                self.assertFalse(app.exception)
+                app.button(key="edit_extracted").click().run()
+                self.assertFalse(app.exception)
+                self.assertEqual(app.text_area[0].value, "Найти производную x²")
+                self.assertFalse(worker.auto_enabled)
+                self.assertTrue(app.session_state["editor_open"])
+                app.text_area[0].input("Найти производную x³").run()
+                app.run()
+                self.assertEqual(app.text_area[0].value, "Найти производную x³")
+            finally:
+                worker.close()
+
     def setUp(self):
         # AppTest переиспользует тестовый ID сессии между экземплярами.
         st.cache_resource.clear()
@@ -83,24 +103,25 @@ class AppTests(unittest.TestCase):
         ):
             try:
                 app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
+                app.selectbox(key="solver_backend").select("OpenAI API").run()
                 self.assertFalse(app.exception)
-                app.button[0].click().run()
+                app.button(key="solve").click().run()
                 solve.assert_not_called()
                 app.text_area[0].input("Найти производную x²").run()
-                app.button[0].click().run()
+                app.button(key="solve").click().run()
                 deadline = time.monotonic() + 3
                 while workers[0].snapshot().status == "solving" and time.monotonic() < deadline:
                     time.sleep(0.01)
                 app.run()
                 self.assertFalse(app.exception)
                 self.assertEqual(workers[0].snapshot().status, "done")
-                self.assertEqual(app.button[0].label, "Решить заново")
+                self.assertEqual(app.button(key="solve").label, "Решить заново")
                 self.assertIn("Производная", "".join(item.value for item in app.markdown))
                 app.text_area[0].input("Найти производную x³").run()
                 self.assertEqual(workers[0].snapshot().status, "waiting")
                 self.assertEqual(app.text_area[0].value, "Найти производную x³")
                 self.assertEqual(solve.call_count, 1)
-                app.button[0].click().run()
+                app.button(key="solve").click().run()
                 deadline = time.monotonic() + 3
                 while workers[0].snapshot().status == "solving" and time.monotonic() < deadline:
                     time.sleep(0.01)
