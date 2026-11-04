@@ -177,6 +177,10 @@ Codex запускается с `--ephemeral`, API — с `store=False`. Эти 
 uv run --no-sync python -m unittest discover -s tests -v
 ```
 
+GitHub Actions запускает эти тесты на каждом push и pull request: Ubuntu,
+Python 3.14, зависимости из `uv.lock`. Секреты для CI не требуются.
+Workflow находится в [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
 Дополнительные проверки запускаются отдельно:
 
 | Команда | Что проверяет | Внешние обращения |
