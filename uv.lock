@@ -740,7 +740,7 @@ wheels = [
 ]
 
 [[package]]
-name = "math-copilot"
+name = "better-call-llm"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

@@ -1,4 +1,4 @@
-"""Интерфейс Math Copilot. Запуск: python -m streamlit run app.py."""
+"""Интерфейс Better call LLM. Запуск: python -m streamlit run app.py."""
 
 import atexit
 

@@ -88,7 +88,7 @@ class AudioCapture:
         process = await asyncio.create_subprocess_exec(
             "parec", "--raw", f"--device={source}", "--rate=16000",
             "--channels=1", "--format=s16le", "--latency-msec=100",
-            "--client-name=Math Copilot", stdout=asyncio.subprocess.PIPE,
+            "--client-name=Better call LLM", stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
         try:
