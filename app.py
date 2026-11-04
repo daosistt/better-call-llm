@@ -1,5 +1,7 @@
 """Интерфейс Math Copilot. Запуск: python -m streamlit run app.py."""
 
+import atexit
+
 import streamlit as st
 
 from audio_capture import list_sources
@@ -12,7 +14,12 @@ def audio_devices():
     return list_sources()
 
 
-@st.cache_resource(scope="session", on_release=lambda worker: worker.close())
+def release_worker(worker: SolverWorker) -> None:
+    atexit.unregister(worker.close)
+    worker.close()
+
+
+@st.cache_resource(scope="global", on_release=release_worker)
 def get_worker() -> SolverWorker:
     settings = load_settings()
     worker = SolverWorker()
@@ -22,6 +29,7 @@ def get_worker() -> SolverWorker:
     worker.audio_buffer_seconds = settings.audio_buffer_seconds
     worker.asr_queue_seconds = settings.asr_queue_seconds
     worker.speech_fragment_seconds = settings.speech_fragment_seconds
+    atexit.register(worker.close)
     return worker
 
 
@@ -34,6 +42,10 @@ def edit_condition(text: str) -> None:
 @st.fragment(run_every=0.5)
 def capture_panel(worker: SolverWorker) -> None:
     state = worker.capture.snapshot()
+    # Новая вкладка подключается к общему захвату, а не отзывает согласие
+    # из-за исходного unchecked-состояния собственного виджета.
+    if state.running:
+        st.session_state.capture_consent = True
     mic = monitor = None
     with st.expander("Аудиоустройства и согласие", expanded=not st.session_state.get("capture_consent", False)):
         if st.button("Обновить устройства", key="refresh_devices", disabled=state.running):
@@ -57,7 +69,12 @@ def capture_panel(worker: SolverWorker) -> None:
                                            format_func=descriptions.get)
         except Exception:
             st.warning("Не удалось получить устройства. Проверьте доступ к PipeWire/PulseAudio.")
-        consent = st.checkbox("Все участники согласны на обработку разговора", key="capture_consent")
+        def consent_changed() -> None:
+            if not st.session_state.capture_consent:
+                worker.stop_capture()
+
+        consent = st.checkbox("Все участники согласны на обработку разговора", key="capture_consent",
+                              on_change=consent_changed)
         st.caption("Аудио распознаётся на ноутбуке. Текст отправляется в Codex; аудиозаписи не сохраняются.")
     controls, automatic = st.columns(2)
     with controls:
@@ -72,8 +89,6 @@ def capture_panel(worker: SolverWorker) -> None:
                      key="toggle_auto", width="stretch", disabled=worker.context_broken):
             worker.set_auto(not worker.auto_enabled)
         st.caption("Полное условие запускает решение автоматически.")
-    if state.running and not consent:
-        worker.stop_capture()
     state = worker.capture.snapshot()
     live = worker.live_snapshot()
     status = "Распознаём речь…" if live.status == "recognizing" else "Слушаем разговор" if state.running else "Прослушивание остановлено"
@@ -104,7 +119,11 @@ def condition_panel(worker: SolverWorker) -> None:
         if st.button("Исправить условие", key="edit_extracted"):
             edit_condition(state.task.solver_condition)
     else:
-        st.caption("Прочитайте задачу вслух — её условие появится здесь.")
+        problem = worker.snapshot().problem
+        if problem:
+            st.markdown(problem)
+        else:
+            st.caption("Прочитайте задачу вслух — её условие появится здесь.")
     for ambiguity in state.task.ambiguities:
         st.warning(ambiguity)
     if state.error:
@@ -196,12 +215,12 @@ def diagnostics_panel(worker: SolverWorker) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Math Copilot", page_icon="∑", layout="wide")
+    st.set_page_config(page_title="Better call LLM", page_icon="∑", layout="wide")
     st.markdown("""<style>
     .block-container {padding-top: 2rem; padding-bottom: 2rem; max-width: 1440px;}
     h1 {letter-spacing: -0.025em;}
     </style>""", unsafe_allow_html=True)
-    st.title("Math Copilot")
+    st.title("Better call LLM")
     st.caption("Слушает разговор. Собирает условие. Помогает решить.")
     try:
         settings = load_settings()

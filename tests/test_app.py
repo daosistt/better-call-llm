@@ -13,6 +13,37 @@ from conversation import ConversationState, ExtractedTask
 
 
 class AppTests(unittest.TestCase):
+    def test_second_view_shares_result_and_does_not_stop_capture(self):
+        worker = SolverWorker()
+        worker.capture.prepare()  # Синтетическое состояние, без микрофона.
+
+        async def solve(problem, settings):
+            yield "Общий ответ для ноутбука и телефона"
+
+        with patch("worker.SolverWorker", return_value=worker) as factory, patch("worker.solve", side_effect=solve):
+            try:
+                worker.start("Общая задача", Settings("test-key"))
+                deadline = time.monotonic() + 2
+                while worker.snapshot().status == "solving" and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                path = Path(__file__).resolve().parents[1] / "app.py"
+                laptop = AppTest.from_file(path).run()
+                phone = AppTest.from_file(path).run()
+                for view in (laptop, phone):
+                    self.assertFalse(view.exception)
+                    content = " ".join(item.value for item in view.markdown)
+                    self.assertIn("Общая задача", content)
+                    self.assertIn("Общий ответ", content)
+                factory.assert_called_once()
+                self.assertTrue(worker.capture.snapshot().running)
+                phone.checkbox(key="capture_consent").uncheck().run()
+                self.assertFalse(worker.capture.snapshot().running)
+                laptop.run()
+                self.assertFalse(laptop.exception)
+                self.assertTrue(laptop.button(key="start_capture"))
+            finally:
+                worker.close()
+
     def test_edit_extracted_condition_preserves_manual_control(self):
         worker = SolverWorker()
         worker.set_auto(True)
