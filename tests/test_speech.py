@@ -46,12 +46,13 @@ class SpeechTests(unittest.TestCase):
 
             model.transcribe.side_effect = transcribe
             with patch("faster_whisper.WhisperModel", return_value=model) as constructor:
-                recognizer = SpeechRecognizer(offline=True)
+                recognizer = SpeechRecognizer(offline=True, model_size="small")
                 for _ in range(2):
                     self.assertEqual(recognizer.transcribe_file(path), (
                         SpeechSegment(0.5, 2.0, "Найдите производную"),
                     ))
                 constructor.assert_called_once()
+                self.assertEqual(constructor.call_args.args, ("small",))
                 options = constructor.call_args.kwargs
                 self.assertEqual(options["device"], "cpu")
                 self.assertEqual(options["compute_type"], "int8")

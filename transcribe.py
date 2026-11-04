@@ -8,24 +8,25 @@ from speech import SpeechRecognizer
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Распознавание русской речи локально: base, CPU INT8, Silero VAD.")
+    parser = argparse.ArgumentParser(description="Распознавание русской речи локально: Whisper base/small, CPU INT8, Silero VAD.")
     parser.add_argument("audio", type=Path, help="Короткий аудиофайл WAV, MP3, M4A или другой формат PyAV")
     parser.add_argument("--offline", action="store_true", help="Использовать только уже скачанную модель, без доступа к сети")
+    parser.add_argument("--model", choices=["base", "small"], default="base")
     args = parser.parse_args()
     if not args.audio.is_file():
         print("Ошибка: аудиофайл не найден.", file=sys.stderr)
         return 1
-    print("Распознавание: base, CPU INT8, язык ru, Silero VAD.", file=sys.stderr)
+    print(f"Распознавание: {args.model}, CPU INT8, язык ru, Silero VAD.", file=sys.stderr)
     if not args.offline:
         print("При первом запуске веса модели загрузятся в локальный кеш. Аудио никуда не отправляется.", file=sys.stderr)
     try:
-        segments = SpeechRecognizer(offline=args.offline).transcribe_file(args.audio)
+        segments = SpeechRecognizer(offline=args.offline, model_size=args.model).transcribe_file(args.audio)
     except KeyboardInterrupt:
         print("Распознавание остановлено.", file=sys.stderr)
         return 130
     except Exception:
         print(
-            "Ошибка распознавания. Проверьте аудиофайл и наличие модели base в кеше. "
+            "Ошибка распознавания. Проверьте аудиофайл и наличие выбранной модели в кеше. "
             "Для первой загрузки требуется интернет; --offline запрещает загрузку.",
             file=sys.stderr,
         )

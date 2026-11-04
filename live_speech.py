@@ -206,6 +206,6 @@ class LiveSpeech:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                self._update(error="Ошибка распознавания. Проверьте локальную модель base и перезапустите прослушивание.")
+                self._update(error="Ошибка распознавания. Проверьте выбранную локальную ASR-модель и перезапустите прослушивание.")
                 self._gap()
             self._update(status="listening", backlog_seconds=0)

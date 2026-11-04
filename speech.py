@@ -26,7 +26,10 @@ class SpeechRecognizer:
     модель; загрузка происходит при первом распознавании.
     """
 
-    def __init__(self, *, offline: bool = False) -> None:
+    def __init__(self, *, offline: bool = False, model_size: str = "base") -> None:
+        if model_size not in {"base", "small"}:
+            raise ValueError("Поддерживаются модели base и small")
+        self.model_size = model_size
         self._offline = offline
         self._model: WhisperModel | None = None
         self._lock = Lock()
@@ -52,7 +55,7 @@ class SpeechRecognizer:
                 from faster_whisper import WhisperModel
 
                 self._model = WhisperModel(
-                    "base",
+                    self.model_size,
                     device="cpu",
                     compute_type="int8",
                     cpu_threads=4,

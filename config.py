@@ -12,6 +12,7 @@ from dotenv import dotenv_values
 class Settings:
     openai_api_key: str = field(default="", repr=False)
     openai_model: str = "gpt-5-mini"
+    asr_model: str = "base"
     extractor_pause: float = 3
     extractor_maximum: float = 15
     task_stability: float = 3
@@ -26,6 +27,9 @@ def load_settings() -> Settings:
     # подхватить изменение .env при следующем обновлении интерфейса.
     key = os.environ.get("OPENAI_API_KEY", values.get("OPENAI_API_KEY") or "")
     model = os.environ.get("OPENAI_MODEL", values.get("OPENAI_MODEL") or "gpt-5-mini")
+    asr_model = os.environ.get("ASR_MODEL", values.get("ASR_MODEL") or "base").strip()
+    if asr_model not in {"base", "small"}:
+        raise ValueError("ASR_MODEL должен быть base или small.")
     def seconds(name: str, default: float) -> float:
         try:
             value = float(os.environ.get(name, values.get(name) or default))
@@ -44,7 +48,7 @@ def load_settings() -> Settings:
     if fragment < 1 or queue < fragment:
         raise ValueError("SPEECH_FRAGMENT_SECONDS должен быть не меньше 1, ASR_QUEUE_SECONDS — не меньше длины фрагмента.")
     return Settings(
-        openai_api_key=key.strip(), openai_model=model.strip() or "gpt-5-mini",
+        openai_api_key=key.strip(), openai_model=model.strip() or "gpt-5-mini", asr_model=asr_model,
         extractor_pause=pause, extractor_maximum=maximum,
         task_stability=seconds("TASK_STABILITY_SECONDS", 3),
         audio_buffer_seconds=seconds("AUDIO_BUFFER_SECONDS", 5),

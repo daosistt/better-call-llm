@@ -8,7 +8,7 @@ from threading import Lock, Thread
 from time import perf_counter
 from typing import Literal
 
-from config import Settings
+from config import Settings, load_settings
 from solver import SolverError, solve
 from speech import SpeechRecognizer
 from audio_capture import AudioCapture
@@ -20,7 +20,7 @@ from live_speech import LiveSpeech, LiveState, Replica
 @lru_cache(maxsize=1)
 def get_recognizer() -> SpeechRecognizer:
     # Одна ленивая модель на процесс, доступ сериализован внутри recognizer.
-    return SpeechRecognizer(offline=True)
+    return SpeechRecognizer(offline=True, model_size=load_settings().asr_model)
 
 
 @dataclass(frozen=True)
@@ -237,7 +237,7 @@ class SolverWorker:
         except Exception:
             result = Transcription(
                 status="error", filename=filename,
-                error="Не удалось распознать файл. Проверьте формат аудио и наличие модели base в локальном кеше.",
+                error="Не удалось распознать файл. Проверьте формат аудио и наличие выбранной ASR-модели в кеше.",
             )
         with self._lock:
             if not self._closed:
