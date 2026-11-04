@@ -8,7 +8,7 @@ from time import monotonic
 
 import numpy as np
 
-from speech import SpeechRecognizer
+from src.speech import SpeechRecognizer
 
 RATE = 16000
 

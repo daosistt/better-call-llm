@@ -6,7 +6,7 @@
 
 import asyncio
 
-from conversation import ExtractedTask, extract
+from src.conversation import ExtractedTask, extract
 
 
 async def main() -> None:

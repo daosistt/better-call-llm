@@ -1,10 +1,10 @@
-"""Ручная проверка ASR на коротком файле: python transcribe.py задача.wav."""
+"""Ручная проверка ASR: python -m src.transcribe задача.wav."""
 
 import argparse
 import sys
 from pathlib import Path
 
-from speech import SpeechRecognizer
+from src.speech import SpeechRecognizer
 
 
 def main() -> int:

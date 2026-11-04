@@ -8,13 +8,13 @@ from threading import Lock, Thread
 from time import perf_counter
 from typing import Literal
 
-from config import Settings, load_settings
-from solver import SolverError, solve
-from speech import SpeechRecognizer
-from audio_capture import AudioCapture
-from conversation import Conversation, ExtractedTask
-from codex_backend import solve_with_codex
-from live_speech import LiveSpeech, LiveState, Replica
+from src.config import Settings, load_settings
+from src.solver import SolverError, solve
+from src.speech import SpeechRecognizer
+from src.audio_capture import AudioCapture
+from src.conversation import Conversation, ExtractedTask
+from src.codex_backend import solve_with_codex
+from src.live_speech import LiveSpeech, LiveState, Replica
 
 
 @lru_cache(maxsize=1)

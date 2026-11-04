@@ -3,8 +3,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 from threading import Event
 
-from live_speech import LiveSpeech, Segmenter, Utterance
-from speech import SpeechSegment
+from src.live_speech import LiveSpeech, Segmenter, Utterance
+from src.speech import SpeechSegment
 
 
 class SegmenterTests(unittest.TestCase):

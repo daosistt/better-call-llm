@@ -4,8 +4,8 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from conversation import ExtractedTask
-from worker import SolverWorker
+from src.conversation import ExtractedTask
+from src.worker import SolverWorker
 
 
 class DialogueFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -44,10 +44,10 @@ class DialogueFlowTests(unittest.IsolatedAsyncioTestCase):
             return "Актуальный ответ: " + problem
 
         with (
-            patch("conversation.extract", new_callable=AsyncMock, side_effect=[
+            patch("src.conversation.extract", new_callable=AsyncMock, side_effect=[
                 ExtractedTask("Дана функция", complete=False), first, first, corrected, new_task,
             ]),
-            patch("worker.solve_with_codex", side_effect=solve),
+            patch("src.worker.solve_with_codex", side_effect=solve),
         ):
             try:
                 worker.set_auto(True)

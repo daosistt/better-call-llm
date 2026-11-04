@@ -22,7 +22,7 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    values = dotenv_values(Path(__file__).with_name(".env"))
+    values = dotenv_values(Path(__file__).resolve().parents[1] / ".env")
     # Переменная окружения имеет приоритет. Повторное чтение позволяет
     # подхватить изменение .env при следующем обновлении интерфейса.
     key = os.environ.get("OPENAI_API_KEY", values.get("OPENAI_API_KEY") or "")

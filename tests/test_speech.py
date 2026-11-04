@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from speech import SpeechRecognizer, SpeechSegment
+from src.speech import SpeechRecognizer, SpeechSegment
 
 
 class SpeechTests(unittest.TestCase):

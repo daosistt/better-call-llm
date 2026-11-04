@@ -6,10 +6,10 @@ from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
 
-from config import Settings
-from worker import SolverWorker, Transcription
-from audio_capture import AudioSource
-from conversation import ConversationState, ExtractedTask
+from src.config import Settings
+from src.worker import SolverWorker, Transcription
+from src.audio_capture import AudioSource
+from src.conversation import ConversationState, ExtractedTask
 
 
 class AppTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class AppTests(unittest.TestCase):
         async def solve(problem, settings):
             yield "Общий ответ для ноутбука и телефона"
 
-        with patch("worker.SolverWorker", return_value=worker) as factory, patch("worker.solve", side_effect=solve):
+        with patch("src.ui.SolverWorker", return_value=worker) as factory, patch("src.worker.solve", side_effect=solve):
             try:
                 worker.start("Общая задача", Settings("test-key"))
                 deadline = time.monotonic() + 2
@@ -48,7 +48,7 @@ class AppTests(unittest.TestCase):
         worker = SolverWorker()
         worker.set_auto(True)
         state = ConversationState(task=ExtractedTask("Найти производную x²", complete=True), status="ready")
-        with patch("worker.SolverWorker", return_value=worker), patch.object(worker.conversation, "snapshot", return_value=state):
+        with patch("src.ui.SolverWorker", return_value=worker), patch.object(worker.conversation, "snapshot", return_value=state):
             try:
                 app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
                 self.assertFalse(app.exception)
@@ -68,7 +68,7 @@ class AppTests(unittest.TestCase):
         st.cache_resource.clear()
         self.addCleanup(st.cache_resource.clear)
         st.cache_data.clear()
-        devices = patch("audio_capture.list_sources", return_value=(
+        devices = patch("src.ui.list_sources", return_value=(
             (AudioSource("mic", "Микрофон ноутбука", False), AudioSource("headset.monitor", "Наушники", True)),
             "mic", "headset.monitor",
         ))
@@ -80,7 +80,7 @@ class AppTests(unittest.TestCase):
         from unittest.mock import AsyncMock
 
         worker = SolverWorker()
-        with patch("worker.SolverWorker", return_value=worker), patch.object(worker.capture, "run", new_callable=AsyncMock):
+        with patch("src.ui.SolverWorker", return_value=worker), patch.object(worker.capture, "run", new_callable=AsyncMock):
             try:
                 app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
                 self.assertTrue(app.button(key="start_capture").disabled)
@@ -98,8 +98,8 @@ class AppTests(unittest.TestCase):
         worker = SolverWorker()
         transcript = Transcription(status="done", filename="test.wav", text="Задача из аудио", seconds=0.8)
         with (
-            patch("config.load_settings", return_value=Settings()),
-            patch("worker.SolverWorker", return_value=worker),
+            patch("src.ui.load_settings", return_value=Settings()),
+            patch("src.ui.SolverWorker", return_value=worker),
             patch.object(worker, "speech_snapshot", return_value=transcript),
         ):
             try:
@@ -128,9 +128,9 @@ class AppTests(unittest.TestCase):
             yield "Производная: $2x$."
 
         with (
-            patch("config.load_settings", return_value=Settings("test-key")),
-            patch("worker.SolverWorker", side_effect=create_worker),
-            patch("worker.solve", side_effect=fake_solve) as solve,
+            patch("src.ui.load_settings", return_value=Settings("test-key")),
+            patch("src.ui.SolverWorker", side_effect=create_worker),
+            patch("src.worker.solve", side_effect=fake_solve) as solve,
         ):
             try:
                 app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()

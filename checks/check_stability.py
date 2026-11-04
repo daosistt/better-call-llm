@@ -18,10 +18,10 @@ from unittest.mock import patch
 import numpy as np
 from faster_whisper.audio import decode_audio
 
-from config import Settings
-from conversation import ExtractedTask
-from speech import SpeechRecognizer
-from worker import SolverWorker
+from src.config import Settings
+from src.conversation import ExtractedTask
+from src.speech import SpeechRecognizer
+from src.worker import SolverWorker
 
 
 def rss_mib() -> float:
@@ -137,10 +137,10 @@ async def main(seconds: float, paths: list[Path], report: Path | None, model_siz
     try:
         with (
             # new= не накапливает историю вызовов mock и не искажает рост RSS.
-            patch("audio_capture.asyncio.create_subprocess_exec", new=spawn),
-            patch("worker.get_recognizer", new=lambda: recognizer),
-            patch("conversation.extract", new=fake_extract),
-            patch("worker.solve_with_codex", new=fake_solve),
+            patch("src.audio_capture.asyncio.create_subprocess_exec", new=spawn),
+            patch("src.worker.get_recognizer", new=lambda: recognizer),
+            patch("src.conversation.extract", new=fake_extract),
+            patch("src.worker.solve_with_codex", new=fake_solve),
             patch.object(worker, "_live_replica", new=receive),
         ):
             worker.start_capture("fixture-microphone", "fixture-output.monitor", consent=True)

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 
-from audio_capture import AudioCapture, level
+from src.audio_capture import AudioCapture, level
 
 
 class CaptureTests(unittest.IsolatedAsyncioTestCase):
@@ -35,7 +35,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
             processes.append(process)
             return process
 
-        with patch("audio_capture.asyncio.create_subprocess_exec", side_effect=spawn) as spawn_mock:
+        with patch("src.audio_capture.asyncio.create_subprocess_exec", side_effect=spawn) as spawn_mock:
             generation = capture.prepare()
             task = asyncio.create_task(capture.run("mic", "headset.monitor", generation))
             await asyncio.wait_for(ready.wait(), 1)
@@ -56,7 +56,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_process_failure_is_reported(self):
         capture = AudioCapture()
-        with patch("audio_capture.asyncio.create_subprocess_exec", side_effect=FileNotFoundError):
+        with patch("src.audio_capture.asyncio.create_subprocess_exec", side_effect=FileNotFoundError):
             await capture.run("mic", "monitor", capture.prepare())
         self.assertFalse(capture.snapshot().running)
         self.assertTrue(capture.snapshot().error)

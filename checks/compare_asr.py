@@ -6,7 +6,7 @@ import resource
 from pathlib import Path
 from time import perf_counter
 
-from speech import SpeechRecognizer
+from src.speech import SpeechRecognizer
 
 
 def main() -> None:

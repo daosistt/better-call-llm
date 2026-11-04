@@ -4,12 +4,12 @@ import unittest
 from threading import Event
 from unittest.mock import patch
 
-from config import Settings
-from solver import SolverError
-from worker import SolverWorker
-from speech import SpeechSegment
+from src.config import Settings
+from src.solver import SolverError
+from src.worker import SolverWorker
+from src.speech import SpeechSegment
 from unittest.mock import MagicMock
-from conversation import ExtractedTask
+from src.conversation import ExtractedTask
 
 
 class WorkerTests(unittest.TestCase):
@@ -42,7 +42,7 @@ class WorkerTests(unittest.TestCase):
             else:
                 yield "Новый ответ"
 
-        with patch("worker.solve", side_effect=fake_solve):
+        with patch("src.worker.solve", side_effect=fake_solve):
             self.worker.start("old", Settings("key"))
             self.assertTrue(started.wait(2))
             self.worker.start("new", Settings("key"))
@@ -57,7 +57,7 @@ class WorkerTests(unittest.TestCase):
             yield "Часть решения"
             raise SolverError("Сеть недоступна")
 
-        with patch("worker.solve", side_effect=fake_solve):
+        with patch("src.worker.solve", side_effect=fake_solve):
             self.worker.start("Задача", Settings("key"))
             state = self.wait_done()
             self.assertEqual(state.status, "error")
@@ -71,8 +71,8 @@ class WorkerTests(unittest.TestCase):
         task = ExtractedTask("Найти производную x²", complete=True)
         from unittest.mock import AsyncMock
         with (
-            patch("conversation.extract", new_callable=AsyncMock, return_value=task),
-            patch("worker.solve_with_codex", new_callable=AsyncMock, return_value="2x") as solve,
+            patch("src.conversation.extract", new_callable=AsyncMock, return_value=task),
+            patch("src.worker.solve_with_codex", new_callable=AsyncMock, return_value="2x") as solve,
         ):
             self.worker.set_auto(True)
             self.worker.add_replica("Найти производную x²", "Ты")
@@ -98,8 +98,8 @@ class WorkerTests(unittest.TestCase):
         task = ExtractedTask("Найти производную икс плюс один в квадрате", complete=True,
                              ambiguities=("Вариант 1: (x+1)^2; вариант 2: x+1^2",))
         with (
-            patch("conversation.extract", new_callable=AsyncMock, return_value=task) as extract,
-            patch("worker.solve_with_codex", new_callable=AsyncMock, return_value="Два ответа") as solve,
+            patch("src.conversation.extract", new_callable=AsyncMock, return_value=task) as extract,
+            patch("src.worker.solve_with_codex", new_callable=AsyncMock, return_value="Два ответа") as solve,
         ):
             self.worker.set_auto(True)
             self.worker.add_replica(task.condition, "Ты")
@@ -134,7 +134,7 @@ class WorkerTests(unittest.TestCase):
 
         recognizer = MagicMock()
         recognizer.transcribe_bytes.side_effect = recognize
-        with patch("worker.get_recognizer", return_value=recognizer), patch("worker.solve", side_effect=fake_solve):
+        with patch("src.worker.get_recognizer", return_value=recognizer), patch("src.worker.solve", side_effect=fake_solve):
             try:
                 self.assertTrue(self.worker.start_transcription(b"audio", "test.wav"))
                 self.assertTrue(started.wait(2))
@@ -154,7 +154,7 @@ class WorkerTests(unittest.TestCase):
     def test_bad_audio_is_reported_and_can_be_retried(self):
         recognizer = MagicMock()
         recognizer.transcribe_bytes.side_effect = ValueError("private decoder details")
-        with patch("worker.get_recognizer", return_value=recognizer):
+        with patch("src.worker.get_recognizer", return_value=recognizer):
             self.assertFalse(self.worker.start_transcription(b"", "empty.wav"))
             self.assertEqual(self.worker.speech_snapshot().status, "error")
             self.assertTrue(self.worker.start_transcription(b"broken", "bad.wav"))
@@ -183,7 +183,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_extractor_does_not_cancel_manual_codex_solution(self):
         from unittest.mock import AsyncMock
-        with patch("worker.solve_with_codex", new_callable=AsyncMock, return_value="Ручной ответ"):
+        with patch("src.worker.solve_with_codex", new_callable=AsyncMock, return_value="Ручной ответ"):
             self.worker.start("Моя задача", Settings(), use_codex=True)
             self.assertEqual(self.wait_done().text, "Ручной ответ")
             self.worker._loop.call_soon_threadsafe(
@@ -205,7 +205,7 @@ class WorkerTests(unittest.TestCase):
             finally:
                 stopped.set()
 
-        with patch("worker.solve", side_effect=fake_solve):
+        with patch("src.worker.solve", side_effect=fake_solve):
             self.worker.start("Задача", Settings("key"))
             self.assertTrue(started.wait(2))
             self.worker.close()

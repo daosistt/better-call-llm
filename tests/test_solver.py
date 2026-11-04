@@ -1,15 +1,39 @@
 import unittest
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx2 as httpx
 from openai import AuthenticationError, RateLimitError
 
-from config import Settings
-from solver import SolverError, solve
+from src.config import Settings
+from src.solver import SolverError, solve
+from src.codex_backend import solve_with_codex
 
 
 class SolverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_prompt_edits_reach_both_backends_without_restart(self):
+        with TemporaryDirectory() as directory:
+            resources = Path(directory)
+            (resources / "prompts").mkdir()
+            prompt = resources / "prompts" / "solver.md"
+            with (
+                patch("src.prompt_loader.PROMPTS_DIR", resources / "prompts"),
+                patch("src.codex_backend.invoke", new_callable=AsyncMock, return_value="Ответ") as invoke,
+            ):
+                for instructions in ("Объясняй методы анализа.", "Помогай с вопросами программирования."):
+                    prompt.write_text(instructions, encoding="utf-8")
+                    client = self.stream_client([SimpleNamespace(type="response.output_text.delta", delta="Ответ")])
+                    with patch("src.solver.AsyncOpenAI", return_value=client):
+                        await self.collect()
+                    self.assertEqual(client.responses.stream.call_args.kwargs["instructions"], instructions)
+                    await solve_with_codex("Как устроен asyncio?")
+                    sent = invoke.call_args.args[0]
+                    self.assertTrue(sent.startswith(instructions + "\n\n"))
+                    self.assertEqual(json.loads(sent.splitlines()[-1]), {"condition": "Как устроен asyncio?"})
+
     async def collect(self) -> str:
         return "".join([chunk async for chunk in solve("Найти производную x²", Settings("test-key"))])
 
@@ -34,7 +58,7 @@ class SolverTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(type="response.output_text.delta", delta="Ответ: "),
             SimpleNamespace(type="response.output_text.delta", delta="$2x$"),
         ])
-        with patch("solver.AsyncOpenAI", return_value=client):
+        with patch("src.solver.AsyncOpenAI", return_value=client):
             self.assertEqual(await self.collect(), "Ответ: $2x$")
         request = client.responses.stream.call_args.kwargs
         self.assertFalse(request["store"])
@@ -46,7 +70,7 @@ class SolverTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(type="response.output_text.delta", delta="Часть решения"),
         ], "incomplete")
         received = []
-        with patch("solver.AsyncOpenAI", return_value=client):
+        with patch("src.solver.AsyncOpenAI", return_value=client):
             with self.assertRaisesRegex(SolverError, "не завершён"):
                 async for chunk in solve("Задача", Settings("test-key")):
                     received.append(chunk)
@@ -55,7 +79,7 @@ class SolverTests(unittest.IsolatedAsyncioTestCase):
     async def test_stream_error_and_empty_response(self):
         for events in ([SimpleNamespace(type="error")], []):
             with self.subTest(events=events):
-                with patch("solver.AsyncOpenAI", return_value=self.stream_client(events)):
+                with patch("src.solver.AsyncOpenAI", return_value=self.stream_client(events)):
                     with self.assertRaises(SolverError):
                         await self.collect()
 
@@ -66,14 +90,14 @@ class SolverTests(unittest.IsolatedAsyncioTestCase):
             (RateLimitError("secret-details", response=response, body=None), "баланс"),
         ):
             with self.subTest(error=type(error).__name__):
-                with patch("solver.AsyncOpenAI", side_effect=error):
+                with patch("src.solver.AsyncOpenAI", side_effect=error):
                     with self.assertRaises(SolverError) as caught:
                         await self.collect()
                 self.assertIn(expected, str(caught.exception))
                 self.assertNotIn("secret-details", str(caught.exception))
 
     async def test_missing_input_does_not_call_api(self):
-        with patch("solver.AsyncOpenAI") as client:
+        with patch("src.solver.AsyncOpenAI") as client:
             for problem, settings in ((" ", Settings("key")), ("Задача", Settings())):
                 with self.assertRaises(SolverError):
                     _ = [chunk async for chunk in solve(problem, settings)]
