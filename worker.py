@@ -11,6 +11,7 @@ from typing import Literal
 from config import Settings
 from solver import SolverError, solve
 from speech import SpeechRecognizer
+from audio_capture import AudioCapture
 
 
 @lru_cache(maxsize=1)
@@ -57,6 +58,8 @@ class SolverWorker:
         self._generation = 0
         self._future: Future[None] | None = None
         self._closed = False
+        self.capture = AudioCapture()
+        self._capture_future: Future[None] | None = None
         self._transcription = Transcription()
         self._speech_future: Future[None] | None = None
         self._loop = asyncio.new_event_loop()
@@ -66,6 +69,24 @@ class SolverWorker:
     def snapshot(self) -> Solution:
         with self._lock:
             return self._solution
+
+    def start_capture(self, microphone: str, monitor: str, *, consent: bool) -> bool:
+        with self._lock:
+            if self._closed or not consent or not microphone or not monitor or microphone == monitor:
+                return False
+            if self.capture.snapshot().running:
+                return False
+            generation = self.capture.prepare()
+            self._capture_future = asyncio.run_coroutine_threadsafe(
+                self.capture.run(microphone, monitor, generation), self._loop,
+            )
+            return True
+
+    def stop_capture(self) -> None:
+        with self._lock:
+            self.capture.stop()
+            if self._capture_future is not None:
+                self._capture_future.cancel()
 
     def speech_snapshot(self) -> Transcription:
         with self._lock:
@@ -156,5 +177,6 @@ class SolverWorker:
             if self._speech_future is not None:
                 self._speech_future.cancel()
         self.cancel()
+        self.stop_capture()
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=2)

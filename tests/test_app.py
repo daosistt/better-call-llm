@@ -8,6 +8,7 @@ from streamlit.testing.v1 import AppTest
 
 from config import Settings
 from worker import SolverWorker, Transcription
+from audio_capture import AudioSource
 
 
 class AppTests(unittest.TestCase):
@@ -15,6 +16,32 @@ class AppTests(unittest.TestCase):
         # AppTest переиспользует тестовый ID сессии между экземплярами.
         st.cache_resource.clear()
         self.addCleanup(st.cache_resource.clear)
+        st.cache_data.clear()
+        devices = patch("audio_capture.list_sources", return_value=(
+            (AudioSource("mic", "Микрофон ноутбука", False), AudioSource("headset.monitor", "Наушники", True)),
+            "mic", "headset.monitor",
+        ))
+        devices.start()
+        self.addCleanup(devices.stop)
+        self.addCleanup(st.cache_data.clear)
+
+    def test_capture_requires_consent_and_stops(self):
+        from unittest.mock import AsyncMock
+
+        worker = SolverWorker()
+        with patch("worker.SolverWorker", return_value=worker), patch.object(worker.capture, "run", new_callable=AsyncMock):
+            try:
+                app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
+                self.assertTrue(app.button(key="start_capture").disabled)
+                app.checkbox(key="capture_consent").check().run()
+                app.button(key="start_capture").click().run()
+                self.assertTrue(worker.capture.snapshot().running)
+                app.run()
+                self.assertTrue(app.selectbox(key="capture_mic").disabled)
+                app.button(key="stop_capture").click().run()
+                self.assertFalse(worker.capture.snapshot().running)
+            finally:
+                worker.close()
 
     def test_recognized_text_requires_explicit_transfer(self):
         worker = SolverWorker()
