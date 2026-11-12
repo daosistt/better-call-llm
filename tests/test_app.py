@@ -13,6 +13,37 @@ from src.conversation import ConversationState, ExtractedTask
 
 
 class AppTests(unittest.TestCase):
+    def test_phone_button_shares_laptop_screenshot(self):
+        from unittest.mock import AsyncMock
+        from test_screen_capture import PNG
+
+        worker = SolverWorker()
+        self.addCleanup(worker.close)
+        with (
+            patch("src.ui.SolverWorker", return_value=worker),
+            patch("src.worker.capture_screen", new_callable=AsyncMock, return_value=PNG) as capture,
+        ):
+            path = Path(__file__).resolve().parents[1] / "app.py"
+            phone = AppTest.from_file(path).run()
+            capture.assert_not_called()
+            phone.button(key="capture_screen").click().run()
+            deadline = time.monotonic() + 2
+            while worker.screen_snapshot().status == "capturing" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            phone.run()
+            laptop = AppTest.from_file(path).run()
+            self.assertFalse(phone.exception)
+            self.assertFalse(laptop.exception)
+            self.assertEqual(worker.screen_snapshot().image, PNG)
+            self.assertTrue(phone.get("image"))
+            self.assertTrue(laptop.get("image"))
+            capture.assert_awaited_once()
+            phone.button(key="clear_screen").click().run()
+            self.assertFalse(phone.exception)
+            self.assertEqual(worker.screen_snapshot().image, b"")
+            laptop.run()
+            self.assertFalse(laptop.get("image"))
+
     def test_second_view_shares_result_and_does_not_stop_capture(self):
         worker = SolverWorker()
         worker.capture.prepare()  # Синтетическое состояние, без микрофона.

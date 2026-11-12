@@ -205,6 +205,26 @@ def audio_panel(worker: SolverWorker) -> None:
 
 
 @st.fragment(run_every=0.5)
+def screen_panel(worker: SolverWorker) -> None:
+    state = worker.screen_snapshot()
+    st.caption("Снимается весь рабочий стол ноутбука, включая все мониторы. Снимок виден во всех вкладках этого сервера.")
+    if st.button("Сделать снимок", key="capture_screen", width="stretch", disabled=state.status == "capturing"):
+        worker.start_screenshot()
+        state = worker.screen_snapshot()
+    if state.status == "capturing":
+        st.info("Делаем снимок экрана ноутбука…")
+    elif state.status == "done":
+        st.image(state.image, caption=f"Экран ноутбука · {state.captured_at}", width="stretch")
+    elif state.error:
+        st.error(state.error)
+    if state.status in {"done", "error"}:
+        if st.button("Убрать снимок", key="clear_screen"):
+            worker.clear_screenshot()
+            st.rerun(scope="app")
+    st.caption("Снимок хранится только в памяти приложения. Модели пока не отправляется.")
+
+
+@st.fragment(run_every=0.5)
 def diagnostics_panel(worker: SolverWorker) -> None:
     capture, live = worker.capture.snapshot(), worker.live_snapshot()
     st.write(f"Блоки: микрофон {capture.microphone_blocks}, системный звук {capture.system_blocks}")
@@ -242,6 +262,8 @@ def main() -> None:
         worker.cancel()
     with st.container(border=True):
         capture_panel(worker)
+    with st.expander("Экран ноутбука"):
+        screen_panel(worker)
     left, right = st.columns([1, 1.5], gap="large")
     with left:
         with st.container(border=True):

@@ -3,6 +3,7 @@
 import asyncio
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
+from datetime import datetime
 from functools import lru_cache
 from threading import Lock, Thread
 from time import perf_counter
@@ -15,6 +16,7 @@ from src.audio_capture import AudioCapture
 from src.conversation import Conversation, ExtractedTask
 from src.codex_backend import solve_with_codex
 from src.live_speech import LiveSpeech, LiveState, Replica
+from src.screen_capture import Screenshot, ScreenCaptureError, capture_screen
 
 
 @lru_cache(maxsize=1)
@@ -78,6 +80,8 @@ class SolverWorker:
         self._capture_future: Future[None] | None = None
         self._transcription = Transcription()
         self._speech_future: Future[None] | None = None
+        self._screenshot = Screenshot()
+        self._screen_future: Future[None] | None = None
         self._loop = asyncio.new_event_loop()
         self._thread = Thread(target=_run_loop, args=(self._loop,), daemon=True)
         self._thread.start()
@@ -210,6 +214,37 @@ class SolverWorker:
         with self._lock:
             return self._transcription
 
+    def screen_snapshot(self) -> Screenshot:
+        with self._lock:
+            return self._screenshot
+
+    def start_screenshot(self) -> bool:
+        with self._lock:
+            if self._closed or self._screenshot.status == "capturing":
+                return False
+            self._screenshot = Screenshot(status="capturing")
+            self._screen_future = asyncio.run_coroutine_threadsafe(self._capture_screen(), self._loop)
+            return True
+
+    def clear_screenshot(self) -> None:
+        with self._lock:
+            if self._screenshot.status != "capturing":
+                self._screenshot = Screenshot()
+
+    async def _capture_screen(self) -> None:
+        try:
+            image = await capture_screen()
+            result = Screenshot(status="done", image=image, captured_at=datetime.now().strftime("%H:%M:%S"))
+        except asyncio.CancelledError:
+            raise
+        except ScreenCaptureError as error:
+            result = Screenshot(status="error", error=str(error))
+        except Exception:
+            result = Screenshot(status="error", error="Не удалось получить снимок экрана ноутбука.")
+        with self._lock:
+            if not self._closed:
+                self._screenshot = result
+
     def start_transcription(self, audio: bytes, filename: str) -> bool:
         with self._lock:
             if self._closed or self._transcription.status == "recognizing":
@@ -300,6 +335,8 @@ class SolverWorker:
             self._closed = True
             if self._speech_future is not None:
                 self._speech_future.cancel()
+            if self._screen_future is not None:
+                self._screen_future.cancel()
         self.cancel()
         self.stop_capture()
         self._loop.call_soon_threadsafe(self.conversation.close)
