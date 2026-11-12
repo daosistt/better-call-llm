@@ -208,20 +208,30 @@ def audio_panel(worker: SolverWorker) -> None:
 def screen_panel(worker: SolverWorker) -> None:
     state = worker.screen_snapshot()
     st.caption("Снимается весь рабочий стол ноутбука, включая все мониторы. Снимок виден во всех вкладках этого сервера.")
-    if st.button("Сделать снимок", key="capture_screen", width="stretch", disabled=state.status == "capturing"):
+    busy = state.status in {"capturing", "analyzing"}
+    if st.button("Сделать снимок", key="capture_screen", width="stretch", disabled=busy):
         worker.start_screenshot()
         state = worker.screen_snapshot()
     if state.status == "capturing":
         st.info("Делаем снимок экрана ноутбука…")
-    elif state.status == "done":
+    if state.image:
         st.image(state.image, caption=f"Экран ноутбука · {state.captured_at}", width="stretch")
-    elif state.error:
+        if st.button("Разобрать условие", key="analyze_screen", width="stretch",
+                     disabled=state.status == "analyzing" or worker.context_broken):
+            worker.start_screen_analysis()
+            state = worker.screen_snapshot()
+        if state.status == "analyzing":
+            st.info("Выделяем условие со снимка и учитываем разговор…")
+        elif state.analyzed:
+            st.success("Снимок разобран. Результат — в карточке «Условие».")
+    if state.error:
         st.error(state.error)
     if state.status in {"done", "error"}:
         if st.button("Убрать снимок", key="clear_screen"):
             worker.clear_screenshot()
             st.rerun(scope="app")
-    st.caption("Снимок хранится только в памяти приложения. Модели пока не отправляется.")
+    st.caption("«Разобрать условие» отправляет показанный снимок и контекст разговора в Codex. "
+               "Результат появится в карточке «Условие»; устные уточнения дополнят его.")
 
 
 @st.fragment(run_every=0.5)

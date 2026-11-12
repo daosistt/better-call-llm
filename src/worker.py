@@ -82,6 +82,7 @@ class SolverWorker:
         self._speech_future: Future[None] | None = None
         self._screenshot = Screenshot()
         self._screen_future: Future[None] | None = None
+        self._screen_analysis_future: Future[None] | None = None
         self._loop = asyncio.new_event_loop()
         self._thread = Thread(target=_run_loop, args=(self._loop,), daemon=True)
         self._thread.start()
@@ -220,7 +221,7 @@ class SolverWorker:
 
     def start_screenshot(self) -> bool:
         with self._lock:
-            if self._closed or self._screenshot.status == "capturing":
+            if self._closed or self._screenshot.status in {"capturing", "analyzing"}:
                 return False
             self._screenshot = Screenshot(status="capturing")
             self._screen_future = asyncio.run_coroutine_threadsafe(self._capture_screen(), self._loop)
@@ -228,8 +229,37 @@ class SolverWorker:
 
     def clear_screenshot(self) -> None:
         with self._lock:
-            if self._screenshot.status != "capturing":
+            if self._screenshot.status not in {"capturing", "analyzing"}:
                 self._screenshot = Screenshot()
+
+    def start_screen_analysis(self) -> bool:
+        with self._lock:
+            if self._closed or self._context_broken or self._screenshot.status != "done" or not self._screenshot.image:
+                return False
+            self._screenshot = replace(self._screenshot, status="analyzing", error="", analyzed=False)
+            self._screen_analysis_future = asyncio.run_coroutine_threadsafe(
+                self._analyze_screen(self._screenshot.image), self._loop,
+            )
+            return True
+
+    async def _analyze_screen(self, image: bytes) -> None:
+        error = ""
+        analyzed = False
+        try:
+            # Снимок меняет контекст; не запускаем ответ по прежнему условию.
+            if self._auto_timer is not None:
+                self._auto_timer.cancel()
+            await self.conversation.analyze_image(image)
+            analyzed = True
+        except asyncio.CancelledError:
+            error = "Разбор снимка остановлен. Можно отправить его ещё раз."
+            raise
+        except Exception:
+            error = "Разбор снимка не удался. Проверьте Codex CLI и повторите запрос."
+        finally:
+            with self._lock:
+                if not self._closed:
+                    self._screenshot = replace(self._screenshot, status="done", error=error, analyzed=analyzed)
 
     async def _capture_screen(self) -> None:
         try:
@@ -337,6 +367,8 @@ class SolverWorker:
                 self._speech_future.cancel()
             if self._screen_future is not None:
                 self._screen_future.cancel()
+            if self._screen_analysis_future is not None:
+                self._screen_analysis_future.cancel()
         self.cancel()
         self.stop_capture()
         self._loop.call_soon_threadsafe(self.conversation.close)

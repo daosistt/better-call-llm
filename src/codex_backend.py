@@ -8,23 +8,38 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from src.prompt_loader import load_prompt
+from src.screen_capture import MAX_IMAGE_BYTES, PNG_SIGNATURE
 
 
 class CodexError(Exception):
     pass
 
 
-async def invoke(prompt: str, *, structured: bool = False) -> str:
+async def invoke(prompt: str, *, structured: bool = False, image: bytes | None = None) -> str:
+    if image is not None and (not image.startswith(PNG_SIGNATURE) or len(image) > MAX_IMAGE_BYTES):
+        raise CodexError("Для разбора нужен снимок PNG размером до 16 МБ.")
     command = [
         "codex", "exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
         "--sandbox", "read-only", "--json", "--color", "never",
     ]
     if structured:
         command += ["--output-schema", str(Path(__file__).parent / "schemas" / "extractor.schema.json")]
-    command.append("-")
     try:
-        # Рабочая папка пуста; содержит только сам каталог, без текста разговора.
-        with TemporaryDirectory(prefix="math-codex-") as directory:
+        # Изображение нужно CLI как файл; /dev/shm — временная память Linux.
+        temporary = TemporaryDirectory(prefix="better-call-llm-", dir="/dev/shm" if image is not None else None)
+    except OSError:
+        raise CodexError("Не удалось подготовить вложение. Проверьте доступ к /dev/shm на ноутбуке.") from None
+    try:
+        with temporary as directory:
+            if image is not None:
+                path = Path(directory) / "screen.png"
+                try:
+                    path.write_bytes(image)
+                except OSError:
+                    raise CodexError("Не удалось подготовить снимок в /dev/shm. Освободите место и повторите запрос.") from None
+                command += ["--image", str(path)]
+            # '--' завершает список вложений перед промптом из stdin.
+            command += ["--", "-"]
             process = await asyncio.create_subprocess_exec(
                 *command, cwd=directory, stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,

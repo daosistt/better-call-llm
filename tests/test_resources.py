@@ -15,7 +15,7 @@ class ResourceTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             try:
                 os.chdir(directory)
-                for name in ("solver", "extractor"):
+                for name in ("solver", "extractor", "screen-extractor"):
                     self.assertTrue(load_prompt(name))
                 schema = Path(__file__).resolve().parents[1] / "src/schemas/extractor.schema.json"
                 self.assertIn("condition", json.loads(schema.read_text(encoding="utf-8"))["properties"])

@@ -22,6 +22,8 @@ class AppTests(unittest.TestCase):
         with (
             patch("src.ui.SolverWorker", return_value=worker),
             patch("src.worker.capture_screen", new_callable=AsyncMock, return_value=PNG) as capture,
+            patch("src.conversation.extract", new_callable=AsyncMock,
+                  return_value=ExtractedTask("Условие с экрана: найти производную x²", complete=True)) as extract,
         ):
             path = Path(__file__).resolve().parents[1] / "app.py"
             phone = AppTest.from_file(path).run()
@@ -38,6 +40,18 @@ class AppTests(unittest.TestCase):
             self.assertTrue(phone.get("image"))
             self.assertTrue(laptop.get("image"))
             capture.assert_awaited_once()
+            extract.assert_not_called()
+            phone.button(key="analyze_screen").click().run()
+            deadline = time.monotonic() + 2
+            while worker.screen_snapshot().status == "analyzing" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            phone.run()
+            laptop.run()
+            extract.assert_awaited_once()
+            self.assertEqual(extract.call_args.kwargs, {"image": PNG})
+            for view in (phone, laptop):
+                self.assertFalse(view.exception)
+                self.assertIn("Условие с экрана", " ".join(item.value for item in view.markdown))
             phone.button(key="clear_screen").click().run()
             self.assertFalse(phone.exception)
             self.assertEqual(worker.screen_snapshot().image, b"")

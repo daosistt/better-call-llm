@@ -2,10 +2,108 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from src.conversation import Conversation, ExtractedTask
+from src.conversation import Conversation, ExtractedTask, extract
 
 
 class ConversationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_image_extraction_preserves_context_and_validates_response(self):
+        import json
+        from test_screen_capture import PNG
+
+        previous = ExtractedTask("Старое условие")
+        response = json.dumps({"condition": "Найти производную x³", "expressions": ["x^3"], "complete": True, "ambiguities": []})
+        with patch("src.conversation.invoke", new_callable=AsyncMock, return_value=response) as invoke:
+            result = await extract(("Поправка: степень три",), previous, image=PNG)
+        self.assertEqual(result.condition, "Найти производную x³")
+        self.assertEqual(invoke.call_args.kwargs, {"structured": True, "image": PNG})
+        sent = json.loads(invoke.call_args.args[0].splitlines()[-1])
+        self.assertEqual(sent["replicas"], ["Поправка: степень три"])
+        self.assertEqual(sent["previous_condition"], previous.condition)
+
+    async def test_image_and_late_correction_share_single_extractor(self):
+        from test_screen_capture import PNG
+
+        manager, results = self.make()
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def extract_task(context, previous, **options):
+            calls.append((context, previous, options))
+            if len(calls) == 1:
+                started.set()
+                await release.wait()
+                return ExtractedTask("x²", complete=True)
+            return ExtractedTask("x³", complete=True)
+
+        with patch("src.conversation.extract", side_effect=extract_task):
+            analysis = asyncio.create_task(manager.analyze_image(PNG))
+            await asyncio.wait_for(started.wait(), 1)
+            manager.add("Поправка: степень три", "Ты")
+            await asyncio.sleep(0.05)
+            self.assertEqual(len(calls), 1)
+            release.set()
+            await asyncio.wait_for(analysis, 1)
+            self.assertEqual([task.condition for task in results], ["x³"])
+            self.assertEqual(calls[1][2], {"image": PNG})
+            manager.add("Объясни ответ", "Ты")
+            await self.settled(manager)
+        self.assertEqual(calls[2][1].condition, "x³")
+        self.assertEqual(calls[2][2], {})  # Снимок не отправляется с каждой репликой.
+
+    async def test_image_queued_after_text_discards_old_text_result(self):
+        from test_screen_capture import PNG
+
+        manager, results = self.make()
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def extract_task(context, previous, **options):
+            if not options:
+                started.set()
+                await release.wait()
+                return ExtractedTask("Старое условие", complete=True)
+            return ExtractedTask("Условие со снимка", complete=True)
+
+        with patch("src.conversation.extract", side_effect=extract_task):
+            manager.add("Старая задача", "Ты")
+            await asyncio.wait_for(started.wait(), 1)
+            analysis = asyncio.create_task(manager.analyze_image(PNG))
+            await asyncio.sleep(0)
+            release.set()
+            await asyncio.wait_for(analysis, 1)
+        self.assertEqual([task.condition for task in results], ["Условие со снимка"])
+
+    async def test_image_failure_retries_only_by_explicit_request(self):
+        from test_screen_capture import PNG
+
+        manager, _ = self.make()
+        with patch("src.conversation.extract", new_callable=AsyncMock, side_effect=[ValueError(), ExtractedTask("Задача")]) as call:
+            with self.assertRaises(ValueError):
+                await manager.analyze_image(PNG)
+            await asyncio.sleep(0.1)
+            self.assertEqual(call.await_count, 1)
+            await manager.analyze_image(PNG)
+        self.assertIsNone(manager._image)
+
+    async def test_reset_cancels_image_without_replacing_context(self):
+        from test_screen_capture import PNG
+
+        manager, results = self.make()
+        started = asyncio.Event()
+
+        async def extract_task(*args, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        with patch("src.conversation.extract", side_effect=extract_task):
+            analysis = asyncio.create_task(manager.analyze_image(PNG))
+            await asyncio.wait_for(started.wait(), 1)
+            manager.reset()
+            with self.assertRaises(asyncio.CancelledError):
+                await analysis
+        self.assertFalse(results)
+        self.assertIsNone(manager._image)
+        self.assertEqual(manager.snapshot().task.condition, "")
+
     def make(self, **kwargs):
         results = []
         manager = Conversation(results.append, pause=0.03, maximum=0.09, **kwargs)

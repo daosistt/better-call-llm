@@ -15,10 +15,11 @@ class ScreenCaptureError(Exception):
 
 @dataclass(frozen=True)
 class Screenshot:
-    status: Literal["waiting", "capturing", "done", "error"] = "waiting"
+    status: Literal["waiting", "capturing", "analyzing", "done", "error"] = "waiting"
     image: bytes = b""
     captured_at: str = ""
     error: str = ""
+    analyzed: bool = False
 
 
 async def capture_screen() -> bytes:

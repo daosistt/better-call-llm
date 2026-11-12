@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.screen_capture import ScreenCaptureError, capture_screen
 from src.worker import SolverWorker
+from src.conversation import ExtractedTask
 
 # Синтетический PNG 1×1, без снимка настоящего экрана.
 PNG = b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB1sAAAAASUVORK5CYII=")
@@ -79,8 +80,73 @@ class ScreenCaptureTests(unittest.IsolatedAsyncioTestCase):
 class ScreenWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def wait_done(self, worker):
         async with asyncio.timeout(2):
-            while worker.screen_snapshot().status == "capturing":
+            while worker.screen_snapshot().status in {"capturing", "analyzing"}:
                 await asyncio.sleep(0.01)
+
+    async def test_screen_task_auto_solves_and_audio_can_correct_it(self):
+        worker = SolverWorker()
+        self.addCleanup(worker.close)
+        worker.task_stability = 0.01
+        worker.conversation.pause = 0.01
+        worker.conversation.maximum = 0.03
+        worker.set_auto(True)
+        first = ExtractedTask("Производная x²", complete=True)
+        corrected = ExtractedTask("Производная x³", complete=True)
+        with (
+            patch("src.worker.capture_screen", new_callable=AsyncMock, return_value=PNG),
+            patch("src.conversation.extract", new_callable=AsyncMock, side_effect=[first, corrected]) as extract,
+            patch("src.worker.solve_with_codex", new_callable=AsyncMock, return_value="Решение") as solve,
+        ):
+            self.assertFalse(worker.start_screen_analysis())
+            worker.start_screenshot()
+            await self.wait_done(worker)
+            self.assertTrue(worker.start_screen_analysis())
+            await self.wait_done(worker)
+            async with asyncio.timeout(2):
+                while solve.await_count < 1:
+                    await asyncio.sleep(0.01)
+            self.assertTrue(worker.screen_snapshot().analyzed)
+            self.assertEqual(solve.call_args.args, (first.condition,))
+            self.assertEqual(extract.call_args.kwargs, {"image": PNG})
+            worker.add_replica("Поправка: степень три", "Ты")
+            async with asyncio.timeout(2):
+                while solve.await_count < 2:
+                    await asyncio.sleep(0.01)
+            self.assertEqual(solve.call_args.args, (corrected.condition,))
+            self.assertEqual(extract.call_args.args[1], first)
+            self.assertEqual(extract.call_args.kwargs, {})
+
+    async def test_analysis_blocks_recapture_and_can_retry_after_error(self):
+        worker = SolverWorker()
+        self.addCleanup(worker.close)
+        started, release = Event(), Event()
+
+        async def extract(*args, **kwargs):
+            started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+            raise ValueError("private-detail")
+
+        with (
+            patch("src.worker.capture_screen", new_callable=AsyncMock, return_value=PNG),
+            patch("src.conversation.extract", side_effect=extract),
+        ):
+            worker.start_screenshot()
+            await self.wait_done(worker)
+            worker.start_screen_analysis()
+            self.assertTrue(await asyncio.to_thread(started.wait, 1))
+            self.assertFalse(worker.start_screen_analysis())
+            self.assertFalse(worker.start_screenshot())
+            worker.clear_screenshot()
+            self.assertEqual(worker.screen_snapshot().status, "analyzing")
+            release.set()
+            await self.wait_done(worker)
+        self.assertEqual(worker.screen_snapshot().image, PNG)
+        self.assertNotIn("private-detail", worker.screen_snapshot().error)
+        with patch("src.conversation.extract", new_callable=AsyncMock, return_value=ExtractedTask("Новая задача")):
+            self.assertTrue(worker.start_screen_analysis())
+            await self.wait_done(worker)
+        self.assertTrue(worker.screen_snapshot().analyzed)
 
     async def test_one_capture_at_a_time_and_clear(self):
         worker = SolverWorker()
