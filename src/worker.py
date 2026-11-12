@@ -65,7 +65,8 @@ class SolverWorker:
         self.task_stability = 3.0
         self.audio_buffer_seconds = 5.0
         self.asr_queue_seconds = 48.0
-        self.speech_fragment_seconds = 12.0
+        self.speech_fragment_seconds = 16.0
+        self.speech_silence_seconds = 2.5
         self._auto_enabled = False
         self._auto_solution = False
         self._last_auto = ""
@@ -144,7 +145,8 @@ class SolverWorker:
                               lambda: self._audio_gap(token),
                               audio_buffer_seconds=self.audio_buffer_seconds,
                               asr_queue_seconds=self.asr_queue_seconds,
-                              fragment_seconds=self.speech_fragment_seconds)
+                              fragment_seconds=self.speech_fragment_seconds,
+                              silence_seconds=self.speech_silence_seconds)
             self._live = live
             self._capture_future = asyncio.run_coroutine_threadsafe(
                 self._capture_with_asr(microphone, monitor, generation, live, token), self._loop,

@@ -29,6 +29,7 @@ def get_worker() -> SolverWorker:
     worker.audio_buffer_seconds = settings.audio_buffer_seconds
     worker.asr_queue_seconds = settings.asr_queue_seconds
     worker.speech_fragment_seconds = settings.speech_fragment_seconds
+    worker.speech_silence_seconds = settings.speech_silence_seconds
     atexit.register(worker.close)
     return worker
 

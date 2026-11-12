@@ -9,7 +9,7 @@ from src.speech import SpeechSegment
 
 class SegmenterTests(unittest.TestCase):
     def test_phrase_emitted_after_silence(self):
-        segmenter = Segmenter("microphone")
+        segmenter = Segmenter("microphone", silence_seconds=0.6)
         with patch("faster_whisper.vad.get_speech_timestamps", return_value=[{"start": 0, "end": 8000}]):
             self.assertEqual(segmenter.push(b"\0\0" * 8000, 0), [])
             result = segmenter.push(b"\0\0" * 8000, 0.5)
@@ -19,7 +19,7 @@ class SegmenterTests(unittest.TestCase):
         self.assertEqual(result[0].end, 0.5)
 
     def test_silence_and_continuous_speech_have_bounded_buffers(self):
-        segmenter = Segmenter("system")
+        segmenter = Segmenter("system", maximum_seconds=12)
         with patch("faster_whisper.vad.get_speech_timestamps", return_value=[]):
             for index in range(300):
                 self.assertEqual(segmenter.push(b"\0\0" * 1600, index / 10), [])
@@ -32,6 +32,25 @@ class SegmenterTests(unittest.TestCase):
                 self.assertLessEqual(len(segmenter.buffer), 12 * 32000)
         self.assertTrue(output)
         self.assertLessEqual(output[0].end - output[0].start, 12)
+
+    def test_thinking_pause_does_not_finish_phrase(self):
+        segmenter = Segmenter("system", silence_seconds=2.5)
+        # Синтетический VAD: полсекунды речи, затем пауза, продолжение и конец.
+        with patch("faster_whisper.vad.get_speech_timestamps", side_effect=[
+            [{"start": 0, "end": 8000}],
+            [{"start": 0, "end": 8000}],
+            [{"start": 0, "end": 40000}],
+            [{"start": 0, "end": 40000}],
+        ]) as vad:
+            self.assertEqual(segmenter.push(b"\0\0" * 8000, 0), [])
+            self.assertEqual(segmenter.push(b"\0\0" * 16000, 0.5), [])
+            self.assertEqual(segmenter.push(b"\0\0" * 16000, 1.5), [])
+            result = segmenter.push(b"\0\0" * 40000, 2.5)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].start, 0)
+        self.assertEqual(result[0].end, 2.5)
+        self.assertEqual(len(result[0].pcm), 40000 * 2)
+        self.assertEqual(vad.call_args.kwargs["min_silence_duration_ms"], 2500)
 
 
 class LiveSpeechTests(unittest.IsolatedAsyncioTestCase):

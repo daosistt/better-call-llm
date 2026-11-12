@@ -18,7 +18,8 @@ class Settings:
     task_stability: float = 3
     audio_buffer_seconds: float = 5
     asr_queue_seconds: float = 48
-    speech_fragment_seconds: float = 12
+    speech_fragment_seconds: float = 16
+    speech_silence_seconds: float = 2.5
 
 
 def load_settings() -> Settings:
@@ -43,14 +44,17 @@ def load_settings() -> Settings:
     maximum = seconds("EXTRACTOR_MAX_SECONDS", 15)
     if maximum < pause:
         raise ValueError("EXTRACTOR_MAX_SECONDS должен быть не меньше EXTRACTOR_PAUSE_SECONDS.")
-    fragment = seconds("SPEECH_FRAGMENT_SECONDS", 12)
+    fragment = seconds("SPEECH_FRAGMENT_SECONDS", 16)
+    silence = seconds("SPEECH_SILENCE_SECONDS", 2.5)
     queue = seconds("ASR_QUEUE_SECONDS", 48)
     if fragment < 1 or queue < fragment:
         raise ValueError("SPEECH_FRAGMENT_SECONDS должен быть не меньше 1, ASR_QUEUE_SECONDS — не меньше длины фрагмента.")
+    if silence >= fragment:
+        raise ValueError("SPEECH_SILENCE_SECONDS должен быть меньше SPEECH_FRAGMENT_SECONDS.")
     return Settings(
         openai_api_key=key.strip(), openai_model=model.strip() or "gpt-5-mini", asr_model=asr_model,
         extractor_pause=pause, extractor_maximum=maximum,
         task_stability=seconds("TASK_STABILITY_SECONDS", 3),
         audio_buffer_seconds=seconds("AUDIO_BUFFER_SECONDS", 5),
-        asr_queue_seconds=queue, speech_fragment_seconds=fragment,
+        asr_queue_seconds=queue, speech_fragment_seconds=fragment, speech_silence_seconds=silence,
     )

@@ -42,11 +42,12 @@ class LiveState:
 
 
 class Segmenter:
-    """VAD пересматривает окно не более 12 с, раз в 0,5 с, вне event loop."""
+    """VAD пересматривает ограниченное окно раз в 0,5 с, вне event loop."""
 
-    def __init__(self, channel: str, maximum_seconds: float = 12) -> None:
+    def __init__(self, channel: str, maximum_seconds: float = 16, *, silence_seconds: float = 2.5) -> None:
         self.channel = channel
         self.maximum_seconds = maximum_seconds
+        self.silence_seconds = silence_seconds
         self.buffer = bytearray()
         self.origin = 0.0
         self.pending = 0
@@ -67,14 +68,16 @@ class Segmenter:
         self.pending = 0
         samples = np.frombuffer(bytes(self.buffer), dtype="<i2").astype(np.float32) / 32768
         ranges = get_speech_timestamps(
-            samples, sampling_rate=RATE, min_silence_duration_ms=600,
+            samples, sampling_rate=RATE, min_silence_duration_ms=round(self.silence_seconds * 1000),
             speech_pad_ms=150, min_speech_duration_ms=250,
         )
         result = []
         consumed = 0
         for speech in ranges:
             end = speech["end"]
-            if len(samples) - end >= int(0.4 * RATE) or len(samples) >= self.maximum_seconds * RATE:
+            # VAD уже добавил 150 мс тишины к концу речи.
+            trailing_silence = max(0.05, self.silence_seconds - 0.15)
+            if len(samples) - end >= int(trailing_silence * RATE) or len(samples) >= self.maximum_seconds * RATE:
                 begin = speech["start"]
                 result.append(Utterance(
                     self.channel, self.origin + begin / RATE, self.origin + end / RATE,
@@ -96,11 +99,13 @@ class Segmenter:
 
 class LiveSpeech:
     def __init__(self, recognizer: SpeechRecognizer, on_replica: Callable[[Replica], None], on_gap: Callable[[], None],
-                 *, audio_buffer_seconds: float = 5, asr_queue_seconds: float = 48, fragment_seconds: float = 12) -> None:
+                 *, audio_buffer_seconds: float = 5, asr_queue_seconds: float = 48,
+                 fragment_seconds: float = 16, silence_seconds: float = 2.5) -> None:
         self.recognizer = recognizer
         self.on_replica, self.on_gap = on_replica, on_gap
         self.origin = monotonic()
         self.fragment_seconds = fragment_seconds
+        self.silence_seconds = silence_seconds
         self.raw = {channel: asyncio.Queue(maxsize=max(1, int(audio_buffer_seconds * 10))) for channel in ("microphone", "system")}
         self.sequence = {channel: 0 for channel in self.raw}
         self.fragments: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=max(1, int(asr_queue_seconds / fragment_seconds)))
@@ -157,7 +162,7 @@ class LiveSpeech:
                 queue.get_nowait()
 
     async def _vad(self, channel: str) -> None:
-        segmenter = Segmenter(channel, self.fragment_seconds)
+        segmenter = Segmenter(channel, self.fragment_seconds, silence_seconds=self.silence_seconds)
         previous = 0
         previous_epoch = self._epoch
         try:
