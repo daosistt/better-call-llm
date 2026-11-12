@@ -26,14 +26,15 @@ class ExtractedTask:
         return self.condition + "\n\nНеоднозначности распознавания и возможные трактовки (не подтверждённые данные):\n" + "\n".join(self.ambiguities)
 
 
-async def extract(context: tuple[str, ...], previous: ExtractedTask) -> ExtractedTask:
+async def extract(context: tuple[str, ...], previous: ExtractedTask, *, image: bytes | None = None) -> ExtractedTask:
+    options = {"image": image} if image is not None else {}
     answer = await invoke(
-        load_prompt("extractor") + "\n" + json.dumps({
+        load_prompt("screen-extractor" if image is not None else "extractor") + "\n" + json.dumps({
             "previous_condition": previous.condition,
             "previous_expressions": previous.expressions,
             "previous_ambiguities": previous.ambiguities,
             "replicas": context,
-        }, ensure_ascii=False), structured=True,
+        }, ensure_ascii=False), structured=True, **options,
     )
     data = json.loads(answer)
     if not isinstance(data, dict) or type(data.get("complete")) is not bool:
@@ -71,6 +72,8 @@ class Conversation:
         self._last = 0.0
         self._changed = asyncio.Event()
         self._runner: asyncio.Task[None] | None = None
+        self._image: bytes | None = None
+        self._image_waiter: asyncio.Future[None] | None = None
 
     def snapshot(self) -> ConversationState:
         with self._lock:
@@ -97,6 +100,35 @@ class Conversation:
         if self._runner is None or self._runner.done():
             self._runner = asyncio.create_task(self._run())
 
+    async def analyze_image(self, image: bytes) -> None:
+        """Снимок проходит через тот же последовательный экстрактор, что и речь."""
+        if self._image_waiter is not None:
+            raise ValueError("Разбор снимка уже выполняется")
+        waiter = asyncio.get_running_loop().create_future()
+        self._image, self._image_waiter = image, waiter
+        self._revision += 1
+        self._dirty_since = monotonic() - self.maximum
+        self._changed.set()
+        self._update(status="pending", error="")
+        if self._runner is None or self._runner.done():
+            self._runner = asyncio.create_task(self._run())
+        try:
+            await waiter
+        finally:
+            if self._image_waiter is waiter:
+                # Отмена владельца снимка делает его ответ устаревшим.
+                self._image = self._image_waiter = None
+                self._revision += 1
+
+    def _finish_image(self, *, error: bool = False) -> None:
+        waiter = self._image_waiter
+        self._image = self._image_waiter = None
+        if waiter is not None and not waiter.done():
+            if error:
+                waiter.set_exception(ValueError("Разбор снимка не удался. Проверьте Codex CLI и повторите запрос."))
+            else:
+                waiter.set_result(None)
+
     async def _run(self) -> None:
         while self._dirty_since is not None:
             due = min(self._last + self.pause, self._dirty_since + self.maximum)
@@ -114,22 +146,30 @@ class Conversation:
             state = self.snapshot()
             self._update(status="extracting", checks=state.checks + 1)
             try:
-                result = await extract(context, state.task)
+                if self._image is not None:
+                    result = await extract(context, state.task, image=self._image)
+                else:
+                    result = await extract(context, state.task)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 if revision == self._revision:
                     self._update(status="error", error="Проверка условия не удалась. Проверьте Codex CLI и добавьте новую реплику для повтора.")
+                    self._finish_image(error=True)
                 continue
             if revision != self._revision:
                 # Новые реплики уже накоплены; не принимаем устаревшее условие.
                 continue
             self._update(task=result, status="ready" if result.complete and result.condition else "incomplete")
+            self._finish_image()
             self._on_result(result)
 
     def close(self) -> None:
         if self._runner is not None:
             self._runner.cancel()
+        if self._image_waiter is not None:
+            self._image_waiter.cancel()
+        self._image = self._image_waiter = None
 
     def reset(self) -> None:
         self.close()

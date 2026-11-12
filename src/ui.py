@@ -205,6 +205,36 @@ def audio_panel(worker: SolverWorker) -> None:
 
 
 @st.fragment(run_every=0.5)
+def screen_panel(worker: SolverWorker) -> None:
+    state = worker.screen_snapshot()
+    st.caption("Снимается весь рабочий стол ноутбука, включая все мониторы. Снимок виден во всех вкладках этого сервера.")
+    busy = state.status in {"capturing", "analyzing"}
+    if st.button("Сделать снимок", key="capture_screen", width="stretch", disabled=busy):
+        worker.start_screenshot()
+        state = worker.screen_snapshot()
+    if state.status == "capturing":
+        st.info("Делаем снимок экрана ноутбука…")
+    if state.image:
+        st.image(state.image, caption=f"Экран ноутбука · {state.captured_at}", width="stretch")
+        if st.button("Разобрать условие", key="analyze_screen", width="stretch",
+                     disabled=state.status == "analyzing" or worker.context_broken):
+            worker.start_screen_analysis()
+            state = worker.screen_snapshot()
+        if state.status == "analyzing":
+            st.info("Выделяем условие со снимка и учитываем разговор…")
+        elif state.analyzed:
+            st.success("Снимок разобран. Результат — в карточке «Условие».")
+    if state.error:
+        st.error(state.error)
+    if state.status in {"done", "error"}:
+        if st.button("Убрать снимок", key="clear_screen"):
+            worker.clear_screenshot()
+            st.rerun(scope="app")
+    st.caption("«Разобрать условие» отправляет показанный снимок и контекст разговора в Codex. "
+               "Результат появится в карточке «Условие»; устные уточнения дополнят его.")
+
+
+@st.fragment(run_every=0.5)
 def diagnostics_panel(worker: SolverWorker) -> None:
     capture, live = worker.capture.snapshot(), worker.live_snapshot()
     st.write(f"Блоки: микрофон {capture.microphone_blocks}, системный звук {capture.system_blocks}")
@@ -242,6 +272,8 @@ def main() -> None:
         worker.cancel()
     with st.container(border=True):
         capture_panel(worker)
+    with st.expander("Экран ноутбука"):
+        screen_panel(worker)
     left, right = st.columns([1, 1.5], gap="large")
     with left:
         with st.container(border=True):
