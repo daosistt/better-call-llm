@@ -12,7 +12,7 @@ from openai import (
 )
 
 from src.config import Settings
-from src.prompt_loader import load_prompt
+from src.prompt_loader import load_solver_prompt
 
 
 class SolverError(Exception):
@@ -31,7 +31,7 @@ async def solve(problem: str, settings: Settings) -> AsyncIterator[str]:
         ) as client:
             async with client.responses.stream(
                 model=settings.openai_model,
-                instructions=load_prompt("solver"),
+                instructions=load_solver_prompt(settings.solver_prompt),
                 input=[{"role": "user", "content": problem.strip()}],
                 reasoning={"effort": "medium"},
                 max_output_tokens=16000,

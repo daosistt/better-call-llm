@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from src.config import load_settings
-from src.prompt_loader import load_prompt
+from src.prompt_loader import SOLVER_PROMPTS, load_prompt, load_solver_prompt
 
 
 class ResourceTests(unittest.TestCase):
@@ -15,8 +15,10 @@ class ResourceTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             try:
                 os.chdir(directory)
-                for name in ("solver", "extractor", "screen-extractor"):
+                for name in ("extractor", "screen-extractor"):
                     self.assertTrue(load_prompt(name))
+                for name in SOLVER_PROMPTS:
+                    self.assertTrue(load_solver_prompt(name))
                 schema = Path(__file__).resolve().parents[1] / "src/schemas/extractor.schema.json"
                 self.assertIn("condition", json.loads(schema.read_text(encoding="utf-8"))["properties"])
             finally:
@@ -26,3 +28,7 @@ class ResourceTests(unittest.TestCase):
         with patch("src.config.dotenv_values", return_value={}) as read:
             load_settings()
         read.assert_called_once_with(Path(__file__).resolve().parents[1] / ".env")
+
+    def test_unknown_profile_cannot_read_arbitrary_file(self):
+        with self.assertRaises(ValueError):
+            load_solver_prompt("../extractor")

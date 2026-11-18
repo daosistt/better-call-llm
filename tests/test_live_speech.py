@@ -54,6 +54,114 @@ class SegmenterTests(unittest.TestCase):
 
 
 class LiveSpeechTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reset_recovers_failed_vad_and_both_sources(self):
+        replicas, gaps = [], []
+        recognizer = MagicMock()
+        recognizer.transcribe_pcm.return_value = (SpeechSegment(0, 1, "Новая реплика"),)
+        live = LiveSpeech(recognizer, replicas.append, lambda: gaps.append(True))
+        failed = False
+
+        def push(segmenter, pcm, start):
+            nonlocal failed
+            if segmenter.channel == "microphone" and not failed:
+                failed = True
+                raise ValueError("synthetic VAD failure")
+            return [Utterance(segmenter.channel, start, start + 0.1, pcm)]
+
+        with patch.object(Segmenter, "push", new=push):
+            live.start()
+            try:
+                live.feed("microphone", b"\0\0" * 1600)
+                async with asyncio.timeout(2):
+                    while not live.snapshot().error:
+                        await asyncio.sleep(0.01)
+                # Несколько сбросов не должны порождать дубликаты обработчиков.
+                live.reset_context()
+                live.reset_context()
+                self.assertEqual(live.snapshot().error, "")
+                live.feed("microphone", b"\0\0" * 1600)
+                live.feed("system", b"\0\0" * 1600)
+                async with asyncio.timeout(2):
+                    while len(replicas) < 2:
+                        await asyncio.sleep(0.01)
+            finally:
+                await live.close()
+        self.assertEqual({r.speaker for r in replicas}, {"Ты", "Собеседник"})
+        self.assertEqual(len(gaps), 1)
+
+    async def test_old_asr_failure_after_reset_does_not_break_new_context(self):
+        started, release = Event(), Event()
+        replicas, gaps = [], []
+        calls = 0
+
+        def recognize(pcm):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                release.wait(2)
+                raise ValueError("failure from discarded context")
+            return (SpeechSegment(0, 1, "Новая реплика"),)
+
+        recognizer = MagicMock()
+        recognizer.transcribe_pcm.side_effect = recognize
+        live = LiveSpeech(recognizer, replicas.append, lambda: gaps.append(True))
+
+        def push(segmenter, pcm, start):
+            return [Utterance(segmenter.channel, start, start + 0.1, pcm)]
+
+        with patch.object(Segmenter, "push", new=push):
+            live.start()
+            try:
+                live.feed("microphone", b"\0\0" * 1600)
+                self.assertTrue(await asyncio.to_thread(started.wait, 1))
+                live.reset_context()
+                release.set()
+                live.feed("system", b"\0\0" * 1600)
+                async with asyncio.timeout(2):
+                    while not replicas:
+                        await asyncio.sleep(0.01)
+            finally:
+                release.set()
+                await live.close()
+        self.assertEqual([r.text for r in replicas], ["Новая реплика"])
+        self.assertEqual(gaps, [])
+        self.assertEqual(live.snapshot().error, "")
+
+    async def test_old_vad_failure_after_reset_is_ignored(self):
+        started, release = Event(), Event()
+        replicas, gaps = [], []
+        recognizer = MagicMock()
+        recognizer.transcribe_pcm.return_value = (SpeechSegment(0, 1, "Новая реплика"),)
+        live = LiveSpeech(recognizer, replicas.append, lambda: gaps.append(True))
+        first = True
+
+        def push(segmenter, pcm, start):
+            nonlocal first
+            if first:
+                first = False
+                started.set()
+                release.wait(2)
+                raise ValueError("failure from old VAD window")
+            return [Utterance(segmenter.channel, start, start + 0.1, pcm)]
+
+        with patch.object(Segmenter, "push", new=push):
+            live.start()
+            try:
+                live.feed("microphone", b"\0\0" * 1600)
+                self.assertTrue(await asyncio.to_thread(started.wait, 1))
+                live.reset_context()
+                live.feed("microphone", b"\0\0" * 1600)
+                release.set()
+                async with asyncio.timeout(2):
+                    while not replicas:
+                        await asyncio.sleep(0.01)
+            finally:
+                release.set()
+                await live.close()
+        self.assertEqual(len(replicas), 1)
+        self.assertEqual(gaps, [])
+
     async def test_raw_overflow_is_bounded_and_reported(self):
         gaps = []
         live = LiveSpeech(MagicMock(), lambda replica: None, lambda: gaps.append(True))
@@ -62,6 +170,10 @@ class LiveSpeechTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live.raw["microphone"].qsize(), 50)
         self.assertEqual(live.snapshot().dropped_blocks, 20)
         self.assertEqual(len(gaps), 20)
+        self.assertIn("буфер аудио", live.snapshot().gap_reason)
+        live.reset_context()
+        self.assertEqual(live.snapshot().gap_reason, "")
+        self.assertEqual(live.snapshot().dropped_blocks, 20)
         await live.close()
         self.assertTrue(live.raw["microphone"].empty())
 

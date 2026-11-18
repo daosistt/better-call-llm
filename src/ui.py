@@ -7,6 +7,7 @@ import streamlit as st
 from src.audio_capture import list_sources
 from src.config import Settings, load_settings
 from src.worker import SolverWorker
+from src.prompt_loader import SOLVER_PROMPTS
 
 
 @st.cache_data(ttl=10, show_spinner=False)
@@ -34,10 +35,27 @@ def get_worker() -> SolverWorker:
     return worker
 
 
-def edit_condition(text: str) -> None:
-    st.session_state.pending_task_text = text
-    st.session_state.editor_open = True
-    st.rerun(scope="app")
+@st.fragment(run_every=0.5)
+def solver_prompt_panel(worker: SolverWorker) -> None:
+    current = worker.solver_prompt
+    if st.session_state.get("shown_solver_prompt") != current:
+        st.session_state.solver_prompt = current
+    st.session_state.shown_solver_prompt = current
+
+    def choose_prompt() -> None:
+        try:
+            worker.set_solver_prompt(st.session_state.solver_prompt)
+            st.session_state.pop("solver_prompt_error", None)
+        except (OSError, ValueError):
+            st.session_state.solver_prompt = worker.solver_prompt
+            st.session_state.solver_prompt_error = "Не удалось прочитать промпт. Проверьте выбранный файл в prompts/solver/."
+
+    st.selectbox("Промпт решателя", list(SOLVER_PROMPTS), format_func=SOLVER_PROMPTS.get,
+                 key="solver_prompt", on_change=choose_prompt)
+    if st.session_state.get("solver_prompt_error"):
+        st.error(st.session_state.solver_prompt_error)
+    st.caption("Общий выбор для ноутбука и телефона. Применяется к следующим решениям по кнопке и автоматическим решениям. "
+               "Для нового ответа на прежнее условие нажмите «Решить заново».")
 
 
 @st.fragment(run_every=0.5)
@@ -92,7 +110,9 @@ def capture_panel(worker: SolverWorker) -> None:
         st.caption("Полное условие запускает решение автоматически.")
     state = worker.capture.snapshot()
     live = worker.live_snapshot()
-    status = "Распознаём речь…" if live.status == "recognizing" else "Слушаем разговор" if state.running else "Прослушивание остановлено"
+    status = ("Обработка приостановлена: нужно восстановить контекст" if worker.context_broken
+              else "Распознаём речь…" if live.status == "recognizing"
+              else "Слушаем разговор" if state.running else "Прослушивание остановлено")
     st.caption(status)
     left, right = st.columns(2)
     with left:
@@ -103,13 +123,16 @@ def capture_panel(worker: SolverWorker) -> None:
         if error:
             st.error(error)
     if worker.context_broken:
-        st.warning("Часть разговора пропущена. Начните новый контекст и повторите условие.")
+        st.warning(f"{live.gap_reason or 'Часть разговора пропущена.'} Начните новый контекст и повторите условие.")
+        st.caption("Кнопка сбросит неполный контекст и восстановит обработку речи. "
+                   "Авторешение возобновится, если было включено до сбоя. "
+                   "Если сам захват остановился, затем нажмите «Начать прослушивание».")
         if st.button("Начать новый контекст", key="reset_audio_context"):
             worker.reset_context()
 
 
 @st.fragment(run_every=0.5)
-def condition_panel(worker: SolverWorker) -> None:
+def condition_panel(worker: SolverWorker, settings: Settings, backend: str) -> None:
     state = worker.conversation.snapshot()
     st.subheader("Условие")
     labels = {"waiting": "Ожидаем задачу", "pending": "Накапливаем реплики…", "extracting": "Уточняем условие…",
@@ -117,8 +140,6 @@ def condition_panel(worker: SolverWorker) -> None:
     st.caption("Решаем с оговорками" if state.status == "ready" and state.task.ambiguities else labels[state.status])
     if state.task.condition:
         st.markdown(state.task.condition)
-        if st.button("Исправить условие", key="edit_extracted"):
-            edit_condition(state.task.solver_condition)
     else:
         problem = worker.snapshot().problem
         if problem:
@@ -130,20 +151,14 @@ def condition_panel(worker: SolverWorker) -> None:
     if state.error:
         st.error(state.error)
 
-
-def manual_editor(worker: SolverWorker, settings: Settings, backend: str) -> None:
-    with st.expander("Ручной ввод и повторное решение", expanded=st.session_state.get("editor_open", False)):
-        st.text_area("Условие задачи", key="task_text", height=190,
-                     placeholder="Введите задачу или нажмите «Исправить условие».", on_change=worker.cancel)
-        st.caption("Ручная правка приостанавливает авторешение. Формулы можно писать в LaTeX.")
-        label = "Решить заново" if worker.snapshot().problem else "Решить"
-        if st.button(label, key="solve", type="primary", width="stretch",
-                     disabled=backend == "OpenAI API" and not settings.openai_api_key):
-            if st.session_state.task_text.strip():
-                worker.set_auto(False)
-                worker.start(st.session_state.task_text, settings, use_codex=backend == "Codex CLI")
-            else:
-                st.warning("Введите условие задачи.")
+    solution = worker.snapshot()
+    condition = state.task.solver_condition or solution.problem
+    if st.button("Решить заново" if solution.problem else "Решить сейчас", key="solve",
+                 type="primary", width="stretch",
+                 disabled=not condition.strip() or worker.context_broken or solution.status == "solving"
+                 or (backend == "OpenAI API" and not settings.openai_api_key)):
+        worker.set_auto(False)
+        worker.start(condition, settings, use_codex=backend == "Codex CLI")
 
 
 @st.fragment(run_every=0.5)
@@ -182,29 +197,6 @@ def transcript_panel(worker: SolverWorker) -> None:
 
 
 @st.fragment(run_every=0.5)
-def audio_panel(worker: SolverWorker) -> None:
-    audio = st.file_uploader("Короткая запись на русском", key="audio_file",
-                             type=["wav", "mp3", "m4a", "ogg", "flac", "opus", "webm", "mp4"])
-    state = worker.speech_snapshot()
-    if st.button("Распознать", key="recognize", disabled=audio is None or state.status == "recognizing"):
-        worker.start_transcription(audio.getvalue(), audio.name)
-        state = worker.speech_snapshot()
-    if state.status == "recognizing":
-        st.info("Распознавание…")
-    elif state.status == "done":
-        st.caption(f"{state.filename} · {state.seconds:.2f} с")
-        if state.text:
-            st.write(state.text)
-            if st.button("Использовать как условие", key="use_transcript"):
-                edit_condition(state.text)
-        else:
-            st.info("Речь не обнаружена.")
-    elif state.error:
-        st.error(state.error)
-    st.caption("Распознавание файла локальное, без вызова решателя.")
-
-
-@st.fragment(run_every=0.5)
 def screen_panel(worker: SolverWorker) -> None:
     state = worker.screen_snapshot()
     st.caption("Снимается весь рабочий стол ноутбука, включая все мониторы. Снимок виден во всех вкладках этого сервера.")
@@ -234,17 +226,6 @@ def screen_panel(worker: SolverWorker) -> None:
                "Результат появится в карточке «Условие»; устные уточнения дополнят его.")
 
 
-@st.fragment(run_every=0.5)
-def diagnostics_panel(worker: SolverWorker) -> None:
-    capture, live = worker.capture.snapshot(), worker.live_snapshot()
-    st.write(f"Блоки: микрофон {capture.microphone_blocks}, системный звук {capture.system_blocks}")
-    st.write(f"Очередь: {live.raw_blocks} блоков, {live.fragments} фрагментов · Задержка ASR {live.backlog_seconds:.1f} с")
-    st.write(f"Потери: {live.dropped_blocks} блоков, {live.dropped_fragments} фрагментов")
-    state = worker.conversation.snapshot()
-    st.write(f"Проверок экстрактора: {state.checks}")
-    st.text("\n".join(state.replicas) or "Контекст пока пуст.")
-
-
 def main() -> None:
     st.set_page_config(page_title="Better call LLM", page_icon="∑", layout="wide")
     st.markdown("""<style>
@@ -259,17 +240,14 @@ def main() -> None:
         st.error(str(error))
         return
     with st.expander("Настройки решателя"):
-        backend = st.selectbox("Решатель для ручного запуска", ["Codex CLI", "OpenAI API"], key="solver_backend")
+        backend = st.selectbox("Решатель для запуска по кнопке", ["Codex CLI", "OpenAI API"], key="solver_backend")
         st.caption("Авторешение и выделение условия используют Codex CLI и его лимиты.")
         if backend == "OpenAI API":
             if not settings.openai_api_key:
                 st.warning("Добавьте OPENAI_API_KEY в .env.")
             st.caption(f"Модель: {settings.openai_model}. Запросы расходуют API-кредиты.")
     worker = get_worker()
-    st.session_state.setdefault("task_text", "")
-    if "pending_task_text" in st.session_state:
-        st.session_state.task_text = st.session_state.pop("pending_task_text")
-        worker.cancel()
+    solver_prompt_panel(worker)
     with st.container(border=True):
         capture_panel(worker)
     with st.expander("Экран ноутбука"):
@@ -277,25 +255,12 @@ def main() -> None:
     left, right = st.columns([1, 1.5], gap="large")
     with left:
         with st.container(border=True):
-            condition_panel(worker)
-        manual_editor(worker, settings, backend)
+            condition_panel(worker, settings, backend)
     with right:
         with st.container(border=True):
             solution_panel(worker)
     with st.expander("Расшифровка разговора"):
         transcript_panel(worker)
-    with st.expander("Дополнительно"):
-        files, replicas, diagnostics = st.tabs(["Аудиофайл", "Текстовые реплики", "Диагностика"])
-        with files:
-            audio_panel(worker)
-        with replicas:
-            with st.form("replica_form", clear_on_submit=True):
-                speaker = st.selectbox("Кто говорит", ["Ты", "Собеседник"], key="replica_speaker")
-                text = st.text_input("Новая реплика", key="replica_text", max_chars=2000)
-                if st.form_submit_button("Добавить реплику") and text.strip():
-                    worker.add_replica(text, speaker)
-        with diagnostics:
-            diagnostics_panel(worker)
 
 
 if __name__ == "__main__":

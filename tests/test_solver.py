@@ -18,7 +18,8 @@ class SolverTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             resources = Path(directory)
             (resources / "prompts").mkdir()
-            prompt = resources / "prompts" / "solver.md"
+            (resources / "prompts" / "solver").mkdir()
+            prompt = resources / "prompts" / "solver" / "analytics.md"
             with (
                 patch("src.prompt_loader.PROMPTS_DIR", resources / "prompts"),
                 patch("src.codex_backend.invoke", new_callable=AsyncMock, return_value="Ответ") as invoke,
@@ -33,6 +34,20 @@ class SolverTests(unittest.IsolatedAsyncioTestCase):
                     sent = invoke.call_args.args[0]
                     self.assertTrue(sent.startswith(instructions + "\n\n"))
                     self.assertEqual(json.loads(sent.splitlines()[-1]), {"condition": "Как устроен asyncio?"})
+
+    async def test_each_profile_reaches_both_backends(self):
+        from src.prompt_loader import SOLVER_PROMPTS, load_solver_prompt
+
+        for name in SOLVER_PROMPTS:
+            with self.subTest(profile=name):
+                expected = load_solver_prompt(name)
+                client = self.stream_client([SimpleNamespace(type="response.output_text.delta", delta="Ответ")])
+                with patch("src.solver.AsyncOpenAI", return_value=client):
+                    _ = [chunk async for chunk in solve("Вопрос", Settings("test-key", solver_prompt=name))]
+                self.assertEqual(client.responses.stream.call_args.kwargs["instructions"], expected)
+                with patch("src.codex_backend.invoke", new_callable=AsyncMock, return_value="Ответ") as invoke:
+                    await solve_with_codex("Вопрос", prompt_name=name)
+                self.assertTrue(invoke.call_args.args[0].startswith(expected + "\n\n"))
 
     async def collect(self) -> str:
         return "".join([chunk async for chunk in solve("Найти производную x²", Settings("test-key"))])

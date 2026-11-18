@@ -7,12 +7,92 @@ from unittest.mock import patch
 from streamlit.testing.v1 import AppTest
 
 from src.config import Settings
-from src.worker import SolverWorker, Transcription
+from src.worker import SolverWorker
 from src.audio_capture import AudioSource
 from src.conversation import ConversationState, ExtractedTask
 
 
 class AppTests(unittest.TestCase):
+    def test_compact_ui_keeps_transcript_and_current_condition_retry(self):
+        worker = SolverWorker()
+        self.addCleanup(worker.close)
+        task = ExtractedTask("Найти производную x²", complete=True)
+
+        async def solve(problem, settings):
+            yield "Производная: $2x$."
+
+        with (
+            patch("src.ui.SolverWorker", return_value=worker),
+            patch("src.ui.load_settings", return_value=Settings("test-key")),
+            patch.object(worker.conversation, "snapshot", return_value=ConversationState(task=task, status="ready")),
+            patch("src.worker.solve", side_effect=solve) as solve_mock,
+        ):
+            app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
+            self.assertFalse(app.exception)
+            labels = [item.label for item in app.expander]
+            self.assertIn("Расшифровка разговора", labels)
+            self.assertNotIn("Дополнительно", labels)
+            self.assertNotIn("Ручной ввод и повторное решение", labels)
+            self.assertFalse(app.text_area)
+            self.assertFalse(app.get("file_uploader"))
+            self.assertFalse([b for b in app.button if b.key == "edit_extracted"])
+            app.selectbox(key="solver_backend").select("OpenAI API").run()
+            app.button(key="solve").click().run()
+            deadline = time.monotonic() + 2
+            while worker.snapshot().status == "solving" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            app.run()
+            self.assertFalse(app.exception)
+            self.assertEqual(worker.snapshot().text, "Производная: $2x$.")
+            self.assertEqual(app.button(key="solve").label, "Решить заново")
+            self.assertEqual(solve_mock.call_args.args[0], task.condition)
+            app.button(key="solve").click().run()
+            deadline = time.monotonic() + 2
+            while worker.snapshot().status == "solving" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(solve_mock.call_count, 2)
+
+    def test_prompt_choice_is_shared_without_stale_view_overwriting_it(self):
+        worker = SolverWorker()
+        self.addCleanup(worker.close)
+        with patch("src.ui.SolverWorker", return_value=worker):
+            path = Path(__file__).resolve().parents[1] / "app.py"
+            laptop = AppTest.from_file(path).run()
+            phone = AppTest.from_file(path).run()
+            laptop.selectbox(key="solver_prompt").select("ml").run()
+            self.assertFalse(laptop.exception)
+            self.assertEqual(worker.solver_prompt, "ml")
+            phone.run()
+            self.assertFalse(phone.exception)
+            self.assertEqual(phone.selectbox(key="solver_prompt").value, "ml")
+            self.assertEqual(worker.solver_prompt, "ml")
+            phone.selectbox(key="solver_prompt").select("physics").run()
+            laptop.run()
+            self.assertFalse(laptop.exception)
+            self.assertEqual(laptop.selectbox(key="solver_prompt").value, "physics")
+
+    def test_recovery_button_restores_previous_auto_mode(self):
+        worker = SolverWorker()
+        self.addCleanup(worker.close)
+        worker.capture.prepare()
+        worker.set_auto(True)
+        worker._loop.call_soon_threadsafe(worker._audio_gap, worker._live_generation)
+        deadline = time.monotonic() + 2
+        while not worker.context_broken and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(worker.context_broken)
+        with patch("src.ui.SolverWorker", return_value=worker):
+            app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
+            self.assertTrue(app.button(key="toggle_auto").disabled)
+            app.button(key="reset_audio_context").click().run()
+            deadline = time.monotonic() + 2
+            while worker.context_broken and time.monotonic() < deadline:
+                time.sleep(0.01)
+            app.run()
+            self.assertFalse(app.exception)
+            self.assertFalse(worker.context_broken)
+            self.assertEqual(app.button(key="toggle_auto").label, "Авторешение: включено")
+
     def test_phone_button_shares_laptop_screenshot(self):
         from unittest.mock import AsyncMock
         from test_screen_capture import PNG
@@ -89,24 +169,6 @@ class AppTests(unittest.TestCase):
             finally:
                 worker.close()
 
-    def test_edit_extracted_condition_preserves_manual_control(self):
-        worker = SolverWorker()
-        worker.set_auto(True)
-        state = ConversationState(task=ExtractedTask("Найти производную x²", complete=True), status="ready")
-        with patch("src.ui.SolverWorker", return_value=worker), patch.object(worker.conversation, "snapshot", return_value=state):
-            try:
-                app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
-                self.assertFalse(app.exception)
-                app.button(key="edit_extracted").click().run()
-                self.assertFalse(app.exception)
-                self.assertEqual(app.text_area[0].value, "Найти производную x²")
-                self.assertFalse(worker.auto_enabled)
-                self.assertTrue(app.session_state["editor_open"])
-                app.text_area[0].input("Найти производную x³").run()
-                app.run()
-                self.assertEqual(app.text_area[0].value, "Найти производную x³")
-            finally:
-                worker.close()
 
     def setUp(self):
         # AppTest переиспользует тестовый ID сессии между экземплярами.
@@ -138,72 +200,3 @@ class AppTests(unittest.TestCase):
                 self.assertFalse(worker.capture.snapshot().running)
             finally:
                 worker.close()
-
-    def test_recognized_text_requires_explicit_transfer(self):
-        worker = SolverWorker()
-        transcript = Transcription(status="done", filename="test.wav", text="Задача из аудио", seconds=0.8)
-        with (
-            patch("src.ui.load_settings", return_value=Settings()),
-            patch("src.ui.SolverWorker", return_value=worker),
-            patch.object(worker, "speech_snapshot", return_value=transcript),
-        ):
-            try:
-                app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
-                self.assertFalse(app.exception)
-                app.text_area[0].input("Моя ручная правка").run()
-                self.assertEqual(app.text_area[0].value, "Моя ручная правка")
-                app.run()
-                self.assertEqual(app.text_area[0].value, "Моя ручная правка")
-                app.button(key="use_transcript").click().run()
-                self.assertFalse(app.exception)
-                self.assertEqual(app.text_area[0].value, "Задача из аудио")
-                self.assertEqual(worker.snapshot().status, "waiting")
-            finally:
-                worker.close()
-
-    def test_solve_edit_and_retry_without_network(self):
-        workers = []
-
-        def create_worker():
-            worker = SolverWorker()
-            workers.append(worker)
-            return worker
-
-        async def fake_solve(problem, settings):
-            yield "Производная: $2x$."
-
-        with (
-            patch("src.ui.load_settings", return_value=Settings("test-key")),
-            patch("src.ui.SolverWorker", side_effect=create_worker),
-            patch("src.worker.solve", side_effect=fake_solve) as solve,
-        ):
-            try:
-                app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
-                app.selectbox(key="solver_backend").select("OpenAI API").run()
-                self.assertFalse(app.exception)
-                app.button(key="solve").click().run()
-                solve.assert_not_called()
-                app.text_area[0].input("Найти производную x²").run()
-                app.button(key="solve").click().run()
-                deadline = time.monotonic() + 3
-                while workers[0].snapshot().status == "solving" and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                app.run()
-                self.assertFalse(app.exception)
-                self.assertEqual(workers[0].snapshot().status, "done")
-                self.assertEqual(app.button(key="solve").label, "Решить заново")
-                self.assertIn("Производная", "".join(item.value for item in app.markdown))
-                app.text_area[0].input("Найти производную x³").run()
-                self.assertEqual(workers[0].snapshot().status, "waiting")
-                self.assertEqual(app.text_area[0].value, "Найти производную x³")
-                self.assertEqual(solve.call_count, 1)
-                app.button(key="solve").click().run()
-                deadline = time.monotonic() + 3
-                while workers[0].snapshot().status == "solving" and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                self.assertEqual(workers[0].snapshot().problem, "Найти производную x³")
-                self.assertEqual(solve.call_count, 2)
-                self.assertEqual(len(workers), 1)
-            finally:
-                for worker in workers:
-                    worker.close()

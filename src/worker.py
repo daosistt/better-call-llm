@@ -17,6 +17,7 @@ from src.conversation import Conversation, ExtractedTask
 from src.codex_backend import solve_with_codex
 from src.live_speech import LiveSpeech, LiveState, Replica
 from src.screen_capture import Screenshot, ScreenCaptureError, capture_screen
+from src.prompt_loader import load_solver_prompt
 
 
 @lru_cache(maxsize=1)
@@ -60,6 +61,7 @@ class SolverWorker:
     def __init__(self) -> None:
         self._lock = Lock()
         self._solution = Solution()
+        self._solver_prompt = "analytics"
         self._generation = 0
         self._future: Future[None] | None = None
         self._closed = False
@@ -77,6 +79,7 @@ class SolverWorker:
         self._live: LiveSpeech | None = None
         self._live_generation = 0
         self._context_broken = False
+        self._auto_before_gap = False
         self._capture_future: Future[None] | None = None
         self._transcription = Transcription()
         self._speech_future: Future[None] | None = None
@@ -90,6 +93,17 @@ class SolverWorker:
     def snapshot(self) -> Solution:
         with self._lock:
             return self._solution
+
+    @property
+    def solver_prompt(self) -> str:
+        with self._lock:
+            return self._solver_prompt
+
+    def set_solver_prompt(self, name: str) -> None:
+        # Проверяем файл до смены общего режима; ошибочный выбор не ломает текущий.
+        load_solver_prompt(name)
+        with self._lock:
+            self._solver_prompt = name
 
     @property
     def auto_enabled(self) -> bool:
@@ -183,20 +197,28 @@ class SolverWorker:
             return
         with self._lock:
             self._context_broken = True
+            was_auto = self._auto_enabled
         self.cancel()
+        with self._lock:
+            self._auto_before_gap = was_auto
         self.conversation.pause_for_gap()
 
     def reset_context(self) -> None:
-        self.cancel()
         self._loop.call_soon_threadsafe(self._reset_context)
 
     def _reset_context(self) -> None:
+        if self._closed:
+            return
+        with self._lock:
+            resume_auto = self._auto_before_gap if self._context_broken else self._auto_enabled
+        self.cancel()
         self.conversation.reset()
         if self._live is not None:
             self._live.reset_context()
         with self._lock:
             self._context_broken = False
             self._last_auto = ""
+            self._auto_enabled = resume_auto
 
     def live_snapshot(self) -> LiveState:
         return self._live.snapshot() if self._live is not None else LiveState()
@@ -313,6 +335,7 @@ class SolverWorker:
     def cancel(self) -> None:
         with self._lock:
             self._auto_enabled = False
+            self._auto_before_gap = False
             self._generation += 1
             self._solution = replace(self._solution, status="waiting", error="")
             if self._future is not None:
@@ -328,7 +351,7 @@ class SolverWorker:
             self._solution = Solution(status="solving", problem=problem)
             self._auto_solution = automatic
             self._future = asyncio.run_coroutine_threadsafe(
-                self._solve(problem, settings, self._generation, use_codex), self._loop,
+                self._solve(problem, replace(settings, solver_prompt=self._solver_prompt), self._generation, use_codex), self._loop,
             )
 
     def _update(self, generation: int, **changes: str) -> None:
@@ -341,7 +364,7 @@ class SolverWorker:
         try:
             async with asyncio.timeout(300):
                 if use_codex:
-                    text = await solve_with_codex(problem)
+                    text = await solve_with_codex(problem, prompt_name=settings.solver_prompt)
                     self._update(generation, text=text)
                 else:
                     async for chunk in solve(problem, settings):

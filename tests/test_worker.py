@@ -10,9 +10,53 @@ from src.worker import SolverWorker
 from src.speech import SpeechSegment
 from unittest.mock import MagicMock
 from src.conversation import ExtractedTask
+from src.live_speech import Replica
 
 
 class WorkerTests(unittest.TestCase):
+    def test_profile_change_applies_to_next_request_only(self):
+        from unittest.mock import AsyncMock
+
+        started, release = Event(), Event()
+
+        async def solve(problem, *, prompt_name):
+            started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.005)
+            return prompt_name
+
+        with patch("src.worker.solve_with_codex", side_effect=solve) as call:
+            self.worker.start("Задача", Settings(), use_codex=True)
+            self.assertTrue(started.wait(1))
+            self.worker.set_solver_prompt("physics")
+            release.set()
+            self.assertEqual(self.wait_done().text, "analytics")
+            self.worker.start("Задача", Settings(), use_codex=True)
+            self.assertEqual(self.wait_done().text, "physics")
+            self.assertEqual(call.call_count, 2)
+
+        # Автоматическое решение тоже берёт общий выбор.
+        self.worker.set_solver_prompt("ml")
+        self.worker.conversation.pause = 0.01
+        self.worker.conversation.maximum = 0.03
+        self.worker.task_stability = 0.01
+        with (
+            patch("src.conversation.extract", new_callable=AsyncMock, return_value=ExtractedTask("ML-вопрос", complete=True)),
+            patch("src.worker.solve_with_codex", new_callable=AsyncMock, return_value="ML-ответ") as solve_ml,
+        ):
+            self.worker.set_auto(True)
+            self.worker.add_replica("ML-вопрос", "Ты")
+            deadline = time.monotonic() + 2
+            while self.worker.snapshot().text != "ML-ответ" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            solve_ml.assert_awaited_once_with("ML-вопрос", prompt_name="ml")
+
+    def test_unreadable_profile_keeps_previous_choice(self):
+        with patch("src.worker.load_solver_prompt", side_effect=FileNotFoundError):
+            with self.assertRaises(FileNotFoundError):
+                self.worker.set_solver_prompt("physics")
+        self.assertEqual(self.worker.solver_prompt, "analytics")
+
     def setUp(self):
         self.worker = SolverWorker()
         self.addCleanup(self.worker.close)
@@ -179,7 +223,54 @@ class WorkerTests(unittest.TestCase):
         while self.worker.context_broken and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertFalse(self.worker.context_broken)
-        self.assertFalse(self.worker.auto_enabled)
+        self.assertTrue(self.worker.auto_enabled)
+
+    def test_new_audio_solves_after_repeated_context_reset(self):
+        from unittest.mock import AsyncMock
+
+        self.worker.conversation.pause = 0.01
+        self.worker.conversation.maximum = 0.03
+        self.worker.task_stability = 0.01
+        self.worker.set_auto(True)
+        self.worker._loop.call_soon_threadsafe(self.worker._audio_gap, self.worker._live_generation)
+        deadline = time.monotonic() + 2
+        while not self.worker.context_broken and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(self.worker.context_broken)
+        with (
+            patch("src.conversation.extract", new_callable=AsyncMock, return_value=ExtractedTask("Новая задача", complete=True)) as extract,
+            patch("src.worker.solve_with_codex", new_callable=AsyncMock, return_value="Новый ответ") as solve,
+        ):
+            self.worker.reset_context()
+            self.worker.reset_context()
+            # Очередь event loop упорядочивает оба сброса перед новой репликой.
+            self.worker._loop.call_soon_threadsafe(
+                self.worker._live_replica, Replica("Собеседник", 10, 11, "Новая задача"), self.worker._live_generation,
+            )
+            deadline = time.monotonic() + 2
+            while self.worker.snapshot().status != "done" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(self.worker.snapshot().text, "Новый ответ")
+            extract.assert_awaited_once()
+            solve.assert_awaited_once()
+
+    def test_reset_does_not_enable_auto_if_user_disabled_it(self):
+        for initially_auto, disable_during_gap in ((False, False), (True, True)):
+            with self.subTest(initially_auto=initially_auto):
+                self.worker.set_auto(initially_auto)
+                self.worker._loop.call_soon_threadsafe(self.worker._audio_gap, self.worker._live_generation)
+                deadline = time.monotonic() + 2
+                while not self.worker.context_broken and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(self.worker.context_broken)
+                if disable_during_gap:
+                    self.worker.set_auto(False)
+                self.worker.reset_context()
+                deadline = time.monotonic() + 2
+                while self.worker.context_broken and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertFalse(self.worker.context_broken)
+                self.assertFalse(self.worker.auto_enabled)
 
     def test_extractor_does_not_cancel_manual_codex_solution(self):
         from unittest.mock import AsyncMock

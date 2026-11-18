@@ -27,7 +27,7 @@ class DialogueFlowTests(unittest.IsolatedAsyncioTestCase):
         finished_old = False
         calls = []
 
-        async def solve(problem):
+        async def solve(problem, **kwargs):
             nonlocal cancelled, finished_old
             calls.append(problem)
             if problem == first.condition:

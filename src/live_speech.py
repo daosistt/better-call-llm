@@ -39,6 +39,7 @@ class LiveState:
     raw_blocks: int = 0
     fragments: int = 0
     error: str = ""
+    gap_reason: str = ""
 
 
 class Segmenter:
@@ -112,7 +113,7 @@ class LiveSpeech:
         self._counter = 0
         self._lock = Lock()
         self._state = LiveState(status="listening")
-        self._tasks: list[asyncio.Task] = []
+        self._tasks: dict[str, asyncio.Task] = {}
         self._active = True
         self._epoch = 0
 
@@ -124,10 +125,13 @@ class LiveSpeech:
         with self._lock:
             self._state = replace(self._state, **changes)
 
-    def _gap(self, *, blocks: int = 0, fragments: int = 0) -> None:
+    def _gap(self, *, blocks: int = 0, fragments: int = 0, reason: str = "") -> None:
         state = self.snapshot()
+        if not reason:
+            reason = ("Переполнен буфер аудио: обработка не успела за захватом." if blocks
+                      else "Переполнена очередь распознавания: ASR не успела обработать фрагменты.")
         self._update(dropped_blocks=state.dropped_blocks + blocks,
-                     dropped_fragments=state.dropped_fragments + fragments)
+                     dropped_fragments=state.dropped_fragments + fragments, gap_reason=reason)
         self.on_gap()
 
     def feed(self, channel: str, pcm: bytes) -> None:
@@ -142,24 +146,36 @@ class LiveSpeech:
         self._update(raw_blocks=sum(item.qsize() for item in self.raw.values()))
 
     def start(self) -> None:
-        self._tasks = [asyncio.create_task(self._vad(channel)) for channel in self.raw]
-        self._tasks.append(asyncio.create_task(self._asr()))
+        self._tasks = {channel: asyncio.create_task(self._vad(channel)) for channel in self.raw}
+        self._tasks["asr"] = asyncio.create_task(self._asr())
 
     async def close(self) -> None:
         self._active = False
-        for task in self._tasks:
+        for task in self._tasks.values():
             task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         for queue in [*self.raw.values(), self.fragments]:
             while not queue.empty():
                 queue.get_nowait()
         self._update(status="stopped", raw_blocks=0, fragments=0, backlog_seconds=0)
 
     def reset_context(self) -> None:
+        if not self._active:
+            return
         self._epoch += 1
         for queue in [*self.raw.values(), self.fragments]:
             while not queue.empty():
                 queue.get_nowait()
+        # После ошибки VAD его задача завершилась: очистки очередей недостаточно.
+        # Живые задачи не отменяем — результаты старой эпохи отбрасываются ниже.
+        for channel in self.raw:
+            task = self._tasks.get(channel)
+            if task is not None and task.done():
+                self._tasks[channel] = asyncio.create_task(self._vad(channel))
+        task = self._tasks.get("asr")
+        if task is not None and task.done():
+            self._tasks["asr"] = asyncio.create_task(self._asr())
+        self._update(status="listening", error="", gap_reason="", raw_blocks=0, fragments=0, backlog_seconds=0)
 
     async def _vad(self, channel: str) -> None:
         segmenter = Segmenter(channel, self.fragment_seconds, silence_seconds=self.silence_seconds)
@@ -173,7 +189,12 @@ class LiveSpeech:
                     segmenter.reset()
                 previous = sequence
                 previous_epoch = epoch
-                utterances = await asyncio.to_thread(segmenter.push, pcm, start)
+                try:
+                    utterances = await asyncio.to_thread(segmenter.push, pcm, start)
+                except Exception:
+                    if epoch != self._epoch:
+                        continue  # Ошибка относится к уже сброшенному контексту.
+                    raise
                 if epoch != self._epoch:
                     continue
                 for utterance in utterances:
@@ -186,12 +207,14 @@ class LiveSpeech:
         except asyncio.CancelledError:
             raise
         except Exception:
-            self._update(error="Ошибка VAD. Остановите прослушивание и запустите его снова.")
-            self._gap()
+            self._update(error="Ошибка определения речи (VAD). Начните новый контекст для восстановления.")
+            self._gap(reason="Сбой определения речевых фрагментов (VAD).")
 
     async def _asr(self) -> None:
         while True:
             _, _, epoch, utterance = await self.fragments.get()
+            if epoch != self._epoch:
+                continue
             self._update(status="recognizing", fragments=self.fragments.qsize(),
                          backlog_seconds=max(0, monotonic() - self.origin - utterance.end))
             try:
@@ -211,6 +234,7 @@ class LiveSpeech:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                self._update(error="Ошибка распознавания. Проверьте выбранную локальную ASR-модель и перезапустите прослушивание.")
-                self._gap()
+                if epoch == self._epoch:
+                    self._update(error="Ошибка распознавания (ASR). Начните новый контекст; если ошибка повторится, проверьте ASR-модель.")
+                    self._gap(reason="Сбой распознавания речи (ASR).")
             self._update(status="listening", backlog_seconds=0)

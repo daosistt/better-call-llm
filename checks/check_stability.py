@@ -118,7 +118,7 @@ async def main(seconds: float, paths: list[Path], report: Path | None, model_siz
         await asyncio.sleep(5)
         return ExtractedTask("Синтетическая задача нагрузки", complete=True)
 
-    async def fake_solve(problem):
+    async def fake_solve(problem, **kwargs):
         observations["solve_calls"] += 1
         await asyncio.sleep(20)
         return "Синтетический ответ для проверки неблокирующего ожидания"

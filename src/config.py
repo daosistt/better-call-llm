@@ -20,6 +20,7 @@ class Settings:
     asr_queue_seconds: float = 48
     speech_fragment_seconds: float = 16
     speech_silence_seconds: float = 2.5
+    solver_prompt: str = "analytics"
 
 
 def load_settings() -> Settings:
